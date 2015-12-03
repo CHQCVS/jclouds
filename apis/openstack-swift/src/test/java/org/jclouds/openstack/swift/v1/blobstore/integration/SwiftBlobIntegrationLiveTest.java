@@ -28,7 +28,7 @@ import org.testng.annotations.Test;
 
 @Test(groups = "live", testName = "SwiftBlobIntegrationLiveTest")
 public class SwiftBlobIntegrationLiveTest extends BaseBlobIntegrationTest {
-   
+
    public SwiftBlobIntegrationLiveTest() {
       provider = "openstack-swift";
    }
@@ -80,17 +80,7 @@ public class SwiftBlobIntegrationLiveTest extends BaseBlobIntegrationTest {
    }
 
    @Override
-   public void testCopyBlobReplaceMetadata() throws Exception {
-      throw new SkipException("Swift only supports appending to user metadata, not replacing it");
-   }
-
-   @Override
-   public void testMultipartUploadSinglePart() throws Exception {
-      throw new SkipException("openstack-swift does not support setting blob metadata during multipart upload");
-   }
-
-   @Override
-   public void testMultipartUploadMultipleParts() throws Exception {
-      throw new SkipException("openstack-swift does not support setting blob metadata during multipart upload");
+   protected long getMinimumMultipartBlobSize() {
+      return 1;
    }
 }

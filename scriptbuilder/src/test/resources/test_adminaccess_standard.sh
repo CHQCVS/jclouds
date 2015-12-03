@@ -1,10 +1,13 @@
 cat > /etc/sudoers <<-'END_OF_JCLOUDS_FILE'
+	Defaults    env_reset
+	Defaults    secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 	root ALL = (ALL) ALL
 	%wheel ALL = (ALL) NOPASSWD:ALL
 END_OF_JCLOUDS_FILE
 chmod 0440 /etc/sudoers
 mkdir -p /home/users
-groupadd -f wheel
+chmod 0755 /home/users
+getent group wheel || groupadd -f wheel
 useradd -c 'defaultAdminUsername' -s /bin/bash -g wheel -m  -d /home/users/defaultAdminUsername -p 'crypt(0)' defaultAdminUsername
 mkdir -p /home/users/defaultAdminUsername/.ssh
 cat >> /home/users/defaultAdminUsername/.ssh/authorized_keys <<-'END_OF_JCLOUDS_FILE'

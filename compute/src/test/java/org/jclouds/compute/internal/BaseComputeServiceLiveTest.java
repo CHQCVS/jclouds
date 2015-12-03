@@ -842,14 +842,24 @@ public abstract class BaseComputeServiceLiveTest extends BaseComputeServiceConte
       for (Hardware hardware : computeService.listHardwareProfiles()) {
          assert hardware.getProviderId() != null : hardware;
          assert getCores(hardware) > 0 : hardware;
-         assert hardware.getVolumes().size() >= 0 : hardware;
          assert hardware.getRam() > 0 : hardware;
          assertEquals(hardware.getType(), ComputeType.HARDWARE);
+         checkVolumes(hardware);
       }
+   }
+
+   protected void checkVolumes(Hardware hardware) {
+      assert hardware.getVolumes().size() > 0 : hardware;
    }
 
    @Test(enabled = true)
    public void testCompareSizes() throws Exception {
+      Hardware defaultSize = computeService.templateBuilder().build().getHardware();
+      // Allow to override the comparison but keeping testng dependencies happy
+      doCompareSizes();
+   }
+
+   protected void doCompareSizes() throws Exception {
       Hardware defaultSize = computeService.templateBuilder().build().getHardware();
 
       Hardware smallest = computeService.templateBuilder().smallest().build().getHardware();

@@ -53,8 +53,6 @@ public class Strings2 {
    }
 
    public static String urlEncode(String in, Iterable<Character> skipEncode) {
-      if (isUrlEncoded(in))
-         return in;
       try {
          String returnVal = URLEncoder.encode(in, "UTF-8");
          returnVal = returnVal.replace("+", "%20");
@@ -90,12 +88,6 @@ public class Strings2 {
    public static boolean isCidrFormat(String in) {
       return CIDR_PATTERN.matcher(in).matches();
    }
-      
-   private static final Pattern URL_ENCODED_PATTERN = Pattern.compile(".*%[a-fA-F0-9][a-fA-F0-9].*");
-
-   public static boolean isUrlEncoded(String in) {
-      return URL_ENCODED_PATTERN.matcher(in).matches();
-   }
 
    /**
     * url decodes the input param, if set.
@@ -110,10 +102,6 @@ public class Strings2 {
       if (in == null)
          return null;
       String input = in.toString();
-      // Don't double decode
-      if (!isUrlEncoded(input)) {
-         return input;
-      }
       try {
          return URLDecoder.decode(input, "UTF-8");
       } catch (UnsupportedEncodingException e) {

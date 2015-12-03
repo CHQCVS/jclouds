@@ -142,7 +142,7 @@ public class ServerInRegionToNodeMetadata implements Function<ServerInRegion, No
       return builder.build();
    }
 
-   private static final Predicate<Address> isPrivateAddress = new Predicate<Address>() {
+   public static final Predicate<Address> isPrivateAddress = new Predicate<Address>() {
       public boolean apply(Address in) {
          return InetAddresses2.IsPrivateIPAddress.INSTANCE.apply(in.getAddr());
       }
@@ -162,7 +162,7 @@ public class ServerInRegionToNodeMetadata implements Function<ServerInRegion, No
 
    };
 
-   private enum AddressToStringTransformationFunction implements Function<Address, String> {
+   public enum AddressToStringTransformationFunction implements Function<Address, String> {
       INSTANCE;
       @Override
       public String apply(Address address) {
