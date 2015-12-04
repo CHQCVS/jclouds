@@ -16,6 +16,7 @@
  */
 package org.jclouds.openstack.swift.v1.features;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.jclouds.http.options.GetOptions.Builder.tail;
 import static org.jclouds.io.Payloads.newByteSourcePayload;
 import static org.jclouds.openstack.swift.v1.options.ListContainerOptions.Builder.marker;
@@ -32,9 +33,9 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.concurrent.TimeUnit;
 
+import org.jclouds.blobstore.KeyNotFoundException;
 import org.jclouds.http.options.GetOptions;
 import org.jclouds.io.Payload;
-import org.jclouds.openstack.swift.v1.CopyObjectException;
 import org.jclouds.openstack.swift.v1.SwiftApi;
 import org.jclouds.openstack.swift.v1.domain.ObjectList;
 import org.jclouds.openstack.swift.v1.domain.SwiftObject;
@@ -141,17 +142,16 @@ public class ObjectApiLiveTest extends BaseSwiftApiLiveTest<SwiftApi> {
          // test exception thrown on bad source name
          try {
             destApi.copy(destinationObject, badSource, sourceObjectName);
-            fail("Expected CopyObjectException");
-         } catch (CopyObjectException e) {
-            assertEquals(e.getSourcePath(), "/" + badSource + "/" + sourceObjectName);
-            assertEquals(e.getDestinationPath(), destinationPath);
+         } catch (KeyNotFoundException e) {
+            continue;
+         } finally {
+            deleteAllObjectsInContainer(regionId, sourceContainer);
+            containerApi.deleteIfEmpty(sourceContainer);
+
+            deleteAllObjectsInContainer(regionId, destinationContainer);
+            containerApi.deleteIfEmpty(destinationContainer);
          }
-
-         deleteAllObjectsInContainer(regionId, sourceContainer);
-         containerApi.deleteIfEmpty(sourceContainer);
-
-         deleteAllObjectsInContainer(regionId, destinationContainer);
-         containerApi.deleteIfEmpty(destinationContainer);
+         fail("Expected KeyNotFoundException");
       }
    }
 
@@ -190,11 +190,10 @@ public class ObjectApiLiveTest extends BaseSwiftApiLiveTest<SwiftApi> {
          SwiftObject object = destApi.get(destinationObject);
          checkObject(object);
 
-         // check the copy operation
-         assertTrue(destApi.copy(destinationObject, sourceContainer, sourceObjectName,
+         // check the copy append metadata operation
+         assertTrue(destApi.copyAppendMetadata(destinationObject, sourceContainer, sourceObjectName,
                ImmutableMap.<String, String>of("additionalUserMetakey", "additionalUserMetavalue"),
                ImmutableMap.of("Content-Disposition", "attachment; filename=\"updatedname.txt\"")));
-         assertNotNull(destApi.get(destinationObject));
 
          // now get a real SwiftObject
          SwiftObject destSwiftObject = destApi.get(destinationObject);
@@ -206,8 +205,8 @@ public class ObjectApiLiveTest extends BaseSwiftApiLiveTest<SwiftApi> {
           */
          Multimap<String, String> srcHeaders = null;
          Multimap<String, String> destHeaders = null;
-         srcHeaders = srcApi.get(sourceObjectName).getHeaders();
-         destHeaders = destApi.get(destinationObject).getHeaders();
+         srcHeaders = srcApi.getWithoutBody(sourceObjectName).getHeaders();
+         destHeaders = destSwiftObject.getHeaders();
          for (Entry<String, String> header : srcHeaders.entries()) {
             if (header.getKey().equals("Date"))continue;
             if (header.getKey().equals("Last-Modified"))continue;
@@ -215,22 +214,34 @@ public class ObjectApiLiveTest extends BaseSwiftApiLiveTest<SwiftApi> {
             if (header.getKey().equals("X-Timestamp"))continue;
             assertTrue(destHeaders.containsEntry(header.getKey(), header.getValue()), "Could not find: " + header);
          }
-         assertEquals(destApi.get(destinationObject).getPayload().getContentMetadata().getContentDisposition(), "attachment; filename=\"updatedname.txt\"");
+         assertEquals(destSwiftObject.getPayload().getContentMetadata().getContentDisposition(), "attachment; filename=\"updatedname.txt\"");
+
+         // check the copy replace metadata operation
+         assertTrue(destApi.copy(destinationObject, sourceContainer, sourceObjectName,
+               ImmutableMap.<String, String>of("key3", "value3"),
+               ImmutableMap.of("Content-Disposition", "attachment; filename=\"updatedname.txt\"")));
+
+         // now get a real SwiftObject
+         destSwiftObject = destApi.get(destinationObject);
+         assertEquals(toStringAndClose(destSwiftObject.getPayload().openStream()), "swifty");
+
+         destHeaders = destSwiftObject.getHeaders();
+         assertThat(destHeaders.get("X-Object-Meta-Key3")).containsExactly("value3");
+         assertEquals(destSwiftObject.getPayload().getContentMetadata().getContentDisposition(), "attachment; filename=\"updatedname.txt\"");
 
          // test exception thrown on bad source name
          try {
             destApi.copy(destinationObject, badSource, sourceObjectName);
-            fail("Expected CopyObjectException");
-         } catch (CopyObjectException e) {
-            assertEquals(e.getSourcePath(), "/" + badSource + "/" + sourceObjectName);
-            assertEquals(e.getDestinationPath(), destinationPath);
+         } catch (KeyNotFoundException e) {
+            continue;
+         } finally {
+            deleteAllObjectsInContainer(regionId, sourceContainer);
+            containerApi.deleteIfEmpty(sourceContainer);
+
+            deleteAllObjectsInContainer(regionId, destinationContainer);
+            containerApi.deleteIfEmpty(destinationContainer);
          }
-
-         deleteAllObjectsInContainer(regionId, sourceContainer);
-         containerApi.deleteIfEmpty(sourceContainer);
-
-         deleteAllObjectsInContainer(regionId, destinationContainer);
-         containerApi.deleteIfEmpty(destinationContainer);
+         fail("Expected KeyNotFoundException");
       }
    }
 

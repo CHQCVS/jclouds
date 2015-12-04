@@ -48,6 +48,7 @@ import net.schmizz.sshj.connection.channel.direct.PTYMode;
 import net.schmizz.sshj.connection.channel.direct.Session;
 import net.schmizz.sshj.connection.channel.direct.Session.Command;
 import net.schmizz.sshj.connection.channel.direct.SessionChannel;
+import net.schmizz.sshj.sftp.RemoteFile;
 import net.schmizz.sshj.sftp.SFTPClient;
 import net.schmizz.sshj.sftp.SFTPException;
 import net.schmizz.sshj.transport.TransportException;
@@ -271,8 +272,18 @@ public class SshjSshClient implements SshClient {
       @Override
       public Payload create() throws Exception {
          sftp = acquire(sftpConnection);
-         return Payloads.newInputStreamPayload(new CloseFtpChannelOnCloseInputStream(sftp.getSFTPEngine().open(path)
-                  .getInputStream(), sftp));
+         final RemoteFile remoteFile = sftp.getSFTPEngine().open(path);
+         final InputStream in = remoteFile.new RemoteFileInputStream() {
+            @Override
+            public void close() throws IOException {
+               try {
+                  super.close();
+               } finally {
+                  remoteFile.close();
+               }
+            }
+         };
+         return Payloads.newInputStreamPayload(new CloseFtpChannelOnCloseInputStream(in, sftp));
       }
 
       @Override
@@ -500,8 +511,8 @@ public class SshjSshClient implements SshClient {
 
    class ExecChannelConnection implements Connection<ExecChannel> {
       private final String command;
-      private SessionChannel session;
       private Command output;
+      private Connection<Session> connection;
 
       ExecChannelConnection(String command) {
          this.command = checkNotNull(command, "command");
@@ -510,13 +521,19 @@ public class SshjSshClient implements SshClient {
       @Override
       public void clear() {
          Closeables2.closeQuietly(output);
-         Closeables2.closeQuietly(session);
+         try {
+             if (connection != null) {
+                 connection.clear();
+             }
+         } catch (Throwable e) {
+             Throwables.propagate(e);
+         }
       }
 
       @Override
       public ExecChannel create() throws Exception {
-         session = SessionChannel.class.cast(acquire(noPTYConnection()));
-         output = session.exec(command);
+         connection = noPTYConnection();
+         output = SessionChannel.class.cast(acquire(connection)).exec(command);
          return new ExecChannel(output.getOutputStream(), output.getInputStream(), output.getErrorStream(),
                   new Supplier<Integer>() {
 

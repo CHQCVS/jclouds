@@ -21,8 +21,10 @@ import static com.google.common.base.Strings.isNullOrEmpty;
 import static com.google.common.io.BaseEncoding.base16;
 import static java.nio.file.Files.getFileAttributeView;
 import static java.nio.file.Files.getPosixFilePermissions;
+import static java.nio.file.Files.probeContentType;
 import static java.nio.file.Files.readAttributes;
 import static java.nio.file.Files.setPosixFilePermissions;
+import static org.jclouds.filesystem.util.Utils.delete;
 import static org.jclouds.filesystem.util.Utils.isPrivate;
 import static org.jclouds.filesystem.util.Utils.isWindows;
 import static org.jclouds.filesystem.util.Utils.setPrivate;
@@ -37,9 +39,11 @@ import java.nio.file.Path;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.UserDefinedFileAttributeView;
+import java.util.Collection;
 import java.util.Date;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 
 import javax.annotation.Resource;
 import javax.inject.Inject;
@@ -108,16 +112,19 @@ public class FilesystemStorageStrategyImpl implements LocalStorageStrategy {
 
    protected final Provider<BlobBuilder> blobBuilders;
    protected final String baseDirectory;
+   protected final boolean autoDetectContentType;
    protected final FilesystemContainerNameValidator filesystemContainerNameValidator;
    protected final FilesystemBlobKeyValidator filesystemBlobKeyValidator;
 
    @Inject
    protected FilesystemStorageStrategyImpl(Provider<BlobBuilder> blobBuilders,
          @Named(FilesystemConstants.PROPERTY_BASEDIR) String baseDir,
+         @Named(FilesystemConstants.PROPERTY_AUTO_DETECT_CONTENT_TYPE) boolean autoDetectContentType,
          FilesystemContainerNameValidator filesystemContainerNameValidator,
          FilesystemBlobKeyValidator filesystemBlobKeyValidator) {
       this.blobBuilders = checkNotNull(blobBuilders, "filesystem storage strategy blobBuilders");
       this.baseDirectory = checkNotNull(baseDir, "filesystem storage strategy base directory");
+      this.autoDetectContentType = autoDetectContentType;
       this.filesystemContainerNameValidator = checkNotNull(filesystemContainerNameValidator,
             "filesystem container name validator");
       this.filesystemBlobKeyValidator = checkNotNull(filesystemBlobKeyValidator, "filesystem blob key validator");
@@ -130,7 +137,7 @@ public class FilesystemStorageStrategyImpl implements LocalStorageStrategy {
    }
 
    @Override
-   public Iterable<String> getAllContainerNames() {
+   public Collection<String> getAllContainerNames() {
       File[] files = new File(buildPathStartingFromBaseDir()).listFiles();
       if (files == null) {
          return ImmutableList.of();
@@ -335,6 +342,9 @@ public class FilesystemStorageStrategyImpl implements LocalStorageStrategy {
             contentEncoding = readStringAttributeIfPresent(view, attributes, XATTR_CONTENT_ENCODING);
             contentLanguage = readStringAttributeIfPresent(view, attributes, XATTR_CONTENT_LANGUAGE);
             contentType = readStringAttributeIfPresent(view, attributes, XATTR_CONTENT_TYPE);
+            if (contentType == null && autoDetectContentType) {
+               contentType = probeContentType(file.toPath());
+            }
             if (attributes.contains(XATTR_CONTENT_MD5)) {
                ByteBuffer buf = ByteBuffer.allocate(view.size(XATTR_CONTENT_MD5));
                view.read(XATTR_CONTENT_MD5, buf);
@@ -352,6 +362,11 @@ public class FilesystemStorageStrategyImpl implements LocalStorageStrategy {
                }
                String value = readStringAttributeIfPresent(view, attributes, attribute);
                userMetadata.put(attribute.substring(XATTR_USER_METADATA_PREFIX.length()), value);
+            }
+
+            if (hashCode == null) {
+                // content-md5 xattr not found; recompute
+                hashCode = byteSource.hash(Hashing.md5());
             }
 
             builder.payload(byteSource)
@@ -436,13 +451,14 @@ public class FilesystemStorageStrategyImpl implements LocalStorageStrategy {
          return putDirectoryBlob(containerName, blob);
       }
       File outputFile = getFileForBlobKey(containerName, blobKey);
+      // TODO: should we use a known suffix to filter these out during list?
+      File tmpFile = getFileForBlobKey(containerName, blobKey + "-" + UUID.randomUUID());
       Path outputPath = outputFile.toPath();
       HashingInputStream his = null;
       try {
-         Files.createParentDirs(outputFile);
+         Files.createParentDirs(tmpFile);
          his = new HashingInputStream(Hashing.md5(), payload.openStream());
-         outputFile.delete();
-         Files.asByteSink(outputFile).writeFrom(his);
+         Files.asByteSink(tmpFile).writeFrom(his);
          HashCode actualHashCode = his.hash();
          HashCode expectedHashCode = payload.getContentMetadata().getContentMD5AsHashCode();
          if (expectedHashCode != null && !actualHashCode.equals(expectedHashCode)) {
@@ -450,6 +466,14 @@ public class FilesystemStorageStrategyImpl implements LocalStorageStrategy {
                   " expected: " + expectedHashCode);
          }
          payload.getContentMetadata().setContentMD5(actualHashCode);
+
+         if (outputFile.exists()) {
+            delete(outputFile);
+         }
+
+         if (!tmpFile.renameTo(outputFile)) {
+            throw new RuntimeException("Could not rename file " + tmpFile + " to " + outputFile);
+         }
 
          UserDefinedFileAttributeView view = getUserDefinedFileAttributeView(outputPath);
          if (view != null) {
@@ -463,9 +487,11 @@ public class FilesystemStorageStrategyImpl implements LocalStorageStrategy {
          setBlobAccess(containerName, blobKey, BlobAccess.PRIVATE);
          return base16().lowerCase().encode(actualHashCode.asBytes());
       } catch (IOException ex) {
-         if (outputFile != null) {
-            if (!outputFile.delete()) {
-               logger.debug("Could not delete %s", outputFile);
+         if (tmpFile != null) {
+            try {
+               delete(tmpFile);
+            } catch (IOException e) {
+               logger.debug("Could not delete %s: %s", tmpFile, e);
             }
          }
          throw ex;
@@ -484,21 +510,24 @@ public class FilesystemStorageStrategyImpl implements LocalStorageStrategy {
       String fileName = buildPathStartingFromBaseDir(container, blobKey);
       logger.debug("Deleting blob %s", fileName);
       File fileToBeDeleted = new File(fileName);
-      if (!fileToBeDeleted.delete()) {
-         if (fileToBeDeleted.isDirectory()) {
-            try {
-               UserDefinedFileAttributeView view = getUserDefinedFileAttributeView(fileToBeDeleted.toPath());
-               if (view != null) {
-                  for (String s : view.list()) {
-                     view.delete(s);
-                  }
+
+      if (fileToBeDeleted.isDirectory()) {
+         try {
+            UserDefinedFileAttributeView view = getUserDefinedFileAttributeView(fileToBeDeleted.toPath());
+            if (view != null) {
+               for (String s : view.list()) {
+                  view.delete(s);
                }
-            } catch (IOException e) {
-               logger.debug("Could not delete attributes from %s", fileToBeDeleted);
             }
-         } else {
-            logger.debug("Could not delete %s", fileToBeDeleted);
+         } catch (IOException e) {
+            logger.debug("Could not delete attributes from %s: %s", fileToBeDeleted, e);
          }
+      }
+
+      try {
+         delete(fileToBeDeleted);
+      } catch (IOException e) {
+         logger.debug("Could not delete %s: %s", fileToBeDeleted, e);
       }
 
       // now examine if the key of the blob is a complex key (with a directory structure)
@@ -724,10 +753,10 @@ public class FilesystemStorageStrategyImpl implements LocalStorageStrategy {
    }
 
    /**
-    * Remove leading and trailing {@link File.separator} character from the string.
+    * Remove leading and trailing separator character from the string.
     *
     * @param pathToBeCleaned
-    * @param remove
+    * @param onlyTrailing
     *           only trailing separator char from path
     * @return
     */
@@ -754,7 +783,7 @@ public class FilesystemStorageStrategyImpl implements LocalStorageStrategy {
     * empty
     *
     * @param container
-    * @param normalizedKey
+    * @param blobKey
     */
    private void removeDirectoriesTreeOfBlobKey(String container, String blobKey) {
       String normalizedBlobKey = denormalize(blobKey);
@@ -771,10 +800,24 @@ public class FilesystemStorageStrategyImpl implements LocalStorageStrategy {
       if (!isNullOrEmpty(parentPath)) {
          // remove parent directory only it's empty
          File directory = new File(buildPathStartingFromBaseDir(container, parentPath));
+         // don't delete directory if it's a directory blob
+         try {
+            UserDefinedFileAttributeView view = getUserDefinedFileAttributeView(directory.toPath());
+            if (view == null) { // OSX HFS+ does not support UserDefinedFileAttributeView
+                logger.debug("Could not look for attributes from %s", directory);
+            } else if (!view.list().isEmpty()) {
+               return;
+            }
+         } catch (IOException e) {
+            logger.debug("Could not look for attributes from %s: %s", directory, e);
+         }
+
          String[] children = directory.list();
          if (null == children || children.length == 0) {
-            if (!directory.delete()) {
-               logger.debug("Could not delete %s", directory);
+            try {
+               delete(directory);
+            } catch (IOException e) {
+               logger.debug("Could not delete %s: %s", directory, e);
                return;
             }
             // recursively call for removing other path

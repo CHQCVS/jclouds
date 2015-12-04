@@ -192,6 +192,13 @@ public final class Constants {
     */
    public static final String PROPERTY_TRUST_ALL_CERTS = "jclouds.trust-all-certs";
    /**
+    * Boolean property.
+    * <p/>
+    * true to allow logging of sensitive information like passwords in the wire log
+    * default value is false
+    */
+   public static final String PROPERTY_LOGGER_WIRE_LOG_SENSITIVE_INFO = "jclouds.wire.log.sensitive";
+   /**
     * Name of the logger that records all http headers from the client and the server.
     */
    public static final String LOGGER_HTTP_HEADERS = "jclouds.headers";
@@ -299,6 +306,12 @@ public final class Constants {
     * providers that don't properly support Expect headers. Defaults to false.
     */
    public static final String PROPERTY_STRIP_EXPECT_HEADER = "jclouds.strip-expect-header";
+
+   /**
+    * When true, add the Connection: close header. Useful when interacting with
+    * providers that don't properly support persistent connections. Defaults to false.
+    */
+   public static final String PROPERTY_CONNECTION_CLOSE_HEADER = "jclouds.connection-close-header";
 
    /**
     * The maximum number of blob deletes happening in parallel at any point in time.

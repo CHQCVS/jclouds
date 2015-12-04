@@ -16,7 +16,8 @@
  */
 package org.jclouds.filesystem.strategy.internal;
 
-import static java.nio.file.Files.getFileStore;
+import static com.google.common.io.BaseEncoding.base16;
+import static org.jclouds.filesystem.util.Utils.isMacOSX;
 import static org.jclouds.utils.TestUtils.randomByteSource;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
@@ -27,16 +28,16 @@ import static org.testng.Assert.fail;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
-import java.nio.file.Paths;
-import java.nio.file.attribute.UserDefinedFileAttributeView;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 import javax.inject.Provider;
 
 import org.jclouds.blobstore.domain.Blob;
 import org.jclouds.blobstore.domain.BlobBuilder;
+import org.jclouds.blobstore.domain.ContainerAccess;
 import org.jclouds.blobstore.domain.internal.BlobBuilderImpl;
 import org.jclouds.blobstore.options.ListContainerOptions;
 import org.jclouds.filesystem.predicates.validators.internal.FilesystemBlobKeyValidatorImpl;
@@ -47,15 +48,17 @@ import org.jclouds.io.payloads.InputStreamPayload;
 import org.jclouds.util.Throwables2;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
-import org.testng.SkipException;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
+import com.google.common.hash.HashCode;
+import com.google.common.hash.Hashing;
 import com.google.common.io.ByteSource;
 import com.google.common.io.Files;
+import com.google.common.util.concurrent.Uninterruptibles;
 
 /**
  * Test class for {@link FilesystemStorageStrategyImpl } class
@@ -84,7 +87,7 @@ public class FilesystemStorageStrategyImplTest {
             return new BlobBuilderImpl();
          }
 
-      }, TestUtils.TARGET_BASE_DIR, new FilesystemContainerNameValidatorImpl(), new FilesystemBlobKeyValidatorImpl());
+      }, TestUtils.TARGET_BASE_DIR, false, new FilesystemContainerNameValidatorImpl(), new FilesystemBlobKeyValidatorImpl());
       TestUtils.cleanDirectoryContent(TestUtils.TARGET_BASE_DIR);
       TestUtils.createResources();
    }
@@ -125,6 +128,20 @@ public class FilesystemStorageStrategyImplTest {
       TestUtils.directoryExists(TARGET_CONTAINER_NAME, true);
    }
 
+   public void testCreateContainerAccess() {
+      boolean result;
+
+      TestUtils.directoryExists(TARGET_CONTAINER_NAME, false);
+      result = storageStrategy.createContainer(CONTAINER_NAME);
+      assertTrue(result, "Container not created");
+      TestUtils.directoryExists(TARGET_CONTAINER_NAME, true);
+
+      storageStrategy.setContainerAccess(CONTAINER_NAME, ContainerAccess.PRIVATE);
+      assertEquals(storageStrategy.getContainerAccess(CONTAINER_NAME), ContainerAccess.PRIVATE);
+      storageStrategy.setContainerAccess(CONTAINER_NAME, ContainerAccess.PUBLIC_READ);
+      assertEquals(storageStrategy.getContainerAccess(CONTAINER_NAME), ContainerAccess.PUBLIC_READ);
+   }
+
    public void testCreateContainer_ContainerAlreadyExists() {
       boolean result;
 
@@ -160,14 +177,6 @@ public class FilesystemStorageStrategyImplTest {
                TestUtils.createRandomBlobKey("lev1" + FS + "lev2" + FS + "lev4" + FS, ".jpg") });
       storageStrategy.deleteDirectory(CONTAINER_NAME, null);
       TestUtils.directoryExists(TARGET_CONTAINER_NAME, false);
-   }
-
-   public void testDeleteDirectory_ErrorWhenNotExists() {
-      try {
-         storageStrategy.deleteDirectory(CONTAINER_NAME, null);
-         fail("No exception throwed");
-      } catch (Exception e) {
-      }
    }
 
    public void testDirectoryExists() throws IOException {
@@ -369,6 +378,40 @@ public class FilesystemStorageStrategyImplTest {
               blobKey.substring(0, blobKey.length() - 1)));
    }
 
+   @Test(dataProvider = "ignoreOnMacOSX")
+   public void testGetBlobContentType_AutoDetect_True() throws IOException {
+      FilesystemStorageStrategyImpl storageStrategyAutoDetectContentType = new FilesystemStorageStrategyImpl(
+          new Provider<BlobBuilder>() {
+             @Override
+             public BlobBuilder get() {
+                return new BlobBuilderImpl();
+             }
+          }, TestUtils.TARGET_BASE_DIR, true, new FilesystemContainerNameValidatorImpl(), new FilesystemBlobKeyValidatorImpl());
+
+      String blobKey = TestUtils.createRandomBlobKey("file-", ".jpg");
+      TestUtils.createBlobsInContainer(CONTAINER_NAME, blobKey);
+      Blob blob = storageStrategyAutoDetectContentType.getBlob(CONTAINER_NAME, blobKey);
+      assertEquals(blob.getMetadata().getContentMetadata().getContentType(), "image/jpeg");
+
+      blobKey = TestUtils.createRandomBlobKey("file-", ".pdf");
+      TestUtils.createBlobsInContainer(CONTAINER_NAME, blobKey);
+      blob = storageStrategyAutoDetectContentType.getBlob(CONTAINER_NAME, blobKey);
+      assertEquals(blob.getMetadata().getContentMetadata().getContentType(), "application/pdf");
+
+      blobKey = TestUtils.createRandomBlobKey("file-", ".mp4");
+      TestUtils.createBlobsInContainer(CONTAINER_NAME, blobKey);
+      blob = storageStrategyAutoDetectContentType.getBlob(CONTAINER_NAME, blobKey);
+      assertEquals(blob.getMetadata().getContentMetadata().getContentType(), "video/mp4");
+   }
+
+   @Test(dataProvider = "ignoreOnMacOSX")
+   public void testGetBlobContentType_AutoDetect_False() throws IOException {
+      String blobKey = TestUtils.createRandomBlobKey("file-", ".jpg");
+      TestUtils.createBlobsInContainer(CONTAINER_NAME, blobKey);
+      Blob blob = storageStrategy.getBlob(CONTAINER_NAME, blobKey);
+      assertEquals(blob.getMetadata().getContentMetadata().getContentType(), null);
+   }
+
    public void testListDirectoryBlob() throws IOException {
       String blobKey = TestUtils.createRandomBlobKey("directory-", File.separator);
       Blob blob = storageStrategy.newBlob(blobKey);
@@ -399,6 +442,7 @@ public class FilesystemStorageStrategyImplTest {
       storageStrategy.putBlob(CONTAINER_NAME, storageStrategy.newBlob(childKey));
 
       storageStrategy.removeBlob(CONTAINER_NAME, parentKey);
+      Uninterruptibles.sleepUninterruptibly(1, TimeUnit.SECONDS);
       assertFalse(storageStrategy.blobExists(CONTAINER_NAME, parentKey));
       assertTrue(storageStrategy.blobExists(CONTAINER_NAME, childKey));
    }
@@ -477,7 +521,7 @@ public class FilesystemStorageStrategyImplTest {
                   public BlobBuilder get() {
                      return new BlobBuilderImpl();
                   }
-               }, absoluteBasePath, new FilesystemContainerNameValidatorImpl(), new FilesystemBlobKeyValidatorImpl());
+               }, absoluteBasePath, false, new FilesystemContainerNameValidatorImpl(), new FilesystemBlobKeyValidatorImpl());
       TestUtils.cleanDirectoryContent(absoluteContainerPath);
 
       String blobKey;
@@ -590,10 +634,8 @@ public class FilesystemStorageStrategyImplTest {
       }
    }
 
+   @Test(dataProvider = "ignoreOnMacOSX")
    public void testOverwriteBlobMetadata() throws Exception {
-      if (!getFileStore(Paths.get(TestUtils.TARGET_BASE_DIR)).supportsFileAttributeView(UserDefinedFileAttributeView.class)) {
-         throw new SkipException("Filesystem does not support xattr");
-      }
       String blobKey = TestUtils.createRandomBlobKey("writePayload-", ".img");
 
       // write blob
@@ -613,10 +655,32 @@ public class FilesystemStorageStrategyImplTest {
             .payload(randomByteSource().slice(0, 1024))
             // no metadata
             .build();
+      Uninterruptibles.sleepUninterruptibly(1, TimeUnit.SECONDS);
       storageStrategy.putBlob(CONTAINER_NAME, blob);
 
       blob = storageStrategy.getBlob(CONTAINER_NAME, blobKey);
       assertFalse(blob.getMetadata().getUserMetadata().containsKey("key1"));
+   }
+
+   // This test will become irrelevant if the JVM starts supporting
+   // user extended attributes on HFS+. Nobody will complain.
+   @Test(dataProvider = "onlyOnMacOSX")
+   public void testEtagReturnedWithoutXattrSupport() throws Exception {
+      String blobKey = TestUtils.createRandomBlobKey();
+      ByteSource content = randomByteSource().slice(0, 1024);
+      HashCode expectedHash = content.hash(Hashing.md5());
+
+      // write blob
+      Blob blob = new BlobBuilderImpl()
+            .name(blobKey)
+            .payload(content)
+            .build();
+      String etag = storageStrategy.putBlob(CONTAINER_NAME, blob);
+
+      // read blob & check etag
+      blob = storageStrategy.getBlob(CONTAINER_NAME, blobKey);
+      assertEquals(blob.getMetadata().getContentMetadata().getContentMD5AsHashCode(), expectedHash);
+      assertEquals(blob.getMetadata().getETag(), base16().lowerCase().encode(expectedHash.asBytes()));
    }
 
    // ---------------------------------------------------------- Private methods
@@ -635,7 +699,13 @@ public class FilesystemStorageStrategyImplTest {
 
    @DataProvider
    public Object[][] ignoreOnMacOSX() {
-        return org.jclouds.utils.TestUtils.isMacOSX() ? TestUtils.NO_INVOCATIONS
+        return isMacOSX() ? TestUtils.NO_INVOCATIONS
                 : TestUtils.SINGLE_NO_ARG_INVOCATION;
    }
+
+  @DataProvider
+  public Object[][] onlyOnMacOSX() {
+      return isMacOSX() ?
+          TestUtils.SINGLE_NO_ARG_INVOCATION : TestUtils.NO_INVOCATIONS;
+  }
 }

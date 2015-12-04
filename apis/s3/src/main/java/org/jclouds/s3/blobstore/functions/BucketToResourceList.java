@@ -16,7 +16,6 @@
  */
 package org.jclouds.s3.blobstore.functions;
 
-import java.util.Map;
 import java.util.SortedSet;
 
 import javax.inject.Inject;
@@ -24,13 +23,11 @@ import javax.inject.Singleton;
 
 import org.jclouds.blobstore.domain.PageSet;
 import org.jclouds.blobstore.domain.StorageMetadata;
-import org.jclouds.blobstore.domain.StorageType;
 import org.jclouds.blobstore.domain.internal.PageSetImpl;
 import org.jclouds.s3.domain.ListBucketResponse;
 
 import com.google.common.base.Function;
 import com.google.common.collect.Iterables;
-import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 
 @Singleton
@@ -58,12 +55,8 @@ public class BucketToResourceList implements
       SortedSet<StorageMetadata> contents = Sets.<StorageMetadata> newTreeSet(Iterables.transform(from,
                object2blobMd));
 
-      Map<String, StorageMetadata> nameToMd = Maps.uniqueIndex(contents, indexer);
       for (String prefix : from.getCommonPrefixes()) {
-         prefix = prefix.endsWith("/") ? prefix.substring(0, prefix.lastIndexOf('/')) : prefix;
-         if (!nameToMd.containsKey(prefix)
-                  || nameToMd.get(prefix).getType() != StorageType.RELATIVE_PATH)
-            contents.add(prefix2ResourceMd.apply(prefix));
+         contents.add(prefix2ResourceMd.apply(prefix));
       }
       return new PageSetImpl<StorageMetadata>(contents, from.getNextMarker());
    }

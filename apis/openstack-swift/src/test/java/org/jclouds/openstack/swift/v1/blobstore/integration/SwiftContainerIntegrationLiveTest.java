@@ -54,7 +54,9 @@ public class SwiftContainerIntegrationLiveTest extends BaseContainerIntegrationT
    }
 
    @Override
-   public void testDelimiter() throws Exception {
-      throw new SkipException("openstack-swift does not implement pseudo-directories");
+   public void testDirectory() {
+      // The test fails with swift, where the marker blob for the directory is removed, as part of the call to
+      // clearContainer
+      throw new SkipException("Swift marker blob is removed when clearing a directory");
    }
 }

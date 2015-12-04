@@ -18,6 +18,7 @@ package org.jclouds.compute.internal;
 
 import static org.jclouds.compute.util.ComputeServiceUtils.getCores;
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertTrue;
 
 import java.io.IOException;
 import java.util.Properties;
@@ -82,8 +83,8 @@ public abstract class BaseTemplateBuilderLiveTest extends BaseComputeServiceCont
    @Test
    public void testDefaultTemplateBuilder() throws IOException {
       Template defaultTemplate = view.getComputeService().templateBuilder().build();
-      assert defaultTemplate.getImage().getOperatingSystem().getVersion().matches("\\d\\d\\.\\d\\d") : defaultTemplate
-            .getImage().getOperatingSystem().getVersion();
+      assertTrue(defaultTemplate.getImage().getOperatingSystem().getVersion().matches("\\d\\d\\.\\d\\d"),
+            "Version mismatch, expected dd.dd, found: " + defaultTemplate.getImage().getOperatingSystem().getVersion());
       assertEquals(defaultTemplate.getImage().getOperatingSystem().is64Bit(), true);
       assertEquals(defaultTemplate.getImage().getOperatingSystem().getFamily(), OsFamily.UBUNTU);
       assertEquals(getCores(defaultTemplate.getHardware()), 1.0d);
@@ -156,7 +157,7 @@ public abstract class BaseTemplateBuilderLiveTest extends BaseComputeServiceCont
 
          context = createView(overrides, setupModules());
 
-         assertEquals(context.getComputeService().templateBuilder().build().toString(), defaultTemplate.toString());
+         assertEqualsTemplate(context.getComputeService().templateBuilder().build(), defaultTemplate);
       } finally {
          if (context != null)
             context.close();
@@ -169,7 +170,7 @@ public abstract class BaseTemplateBuilderLiveTest extends BaseComputeServiceCont
 
          context = createView(overrides, setupModules());
 
-         assertEquals(context.getComputeService().templateBuilder().build().toString(), defaultTemplate.toString());
+         assertEqualsTemplate(context.getComputeService().templateBuilder().build(), defaultTemplate);
       } finally {
          if (context != null)
             context.close();
@@ -213,6 +214,13 @@ public abstract class BaseTemplateBuilderLiveTest extends BaseComputeServiceCont
       assertEquals(provider.getScope(), LocationScope.PROVIDER);
       assertEquals(provider.getParent(), null);
       assertEquals(provider.getIso3166Codes(), getIso3166Codes());
+   }
+
+   static void assertEqualsTemplate(Template actual, Template expected){
+      assertEquals(actual.getImage(), expected.getImage());
+      assertEquals(actual.getHardware(), expected.getHardware());
+      assertEquals(actual.getOptions(), expected.getOptions());
+      assertTrue(actual.getLocation().getScope().compareTo(expected.getLocation().getScope()) <= 0);
    }
 
 }
