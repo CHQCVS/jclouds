@@ -17,6 +17,9 @@
 
 package org.jclouds.blobstore.domain;
 
+import org.jclouds.blobstore.options.PutOptions;
+import org.jclouds.javax.annotation.Nullable;
+
 import com.google.auto.value.AutoValue;
 
 @AutoValue
@@ -24,9 +27,11 @@ public abstract class MultipartUpload {
    public abstract String containerName();
    public abstract String blobName();
    public abstract String id();
-   public abstract BlobMetadata blobMetadata();
+   @Nullable public abstract BlobMetadata blobMetadata();
+   @Nullable public abstract PutOptions putOptions();
 
-   public static MultipartUpload create(String containerName, String blobName, String id, BlobMetadata blobMetadata) {
-      return new AutoValue_MultipartUpload(containerName, blobName, id, blobMetadata);
+   public static MultipartUpload create(String containerName, String blobName, String id, @Nullable BlobMetadata blobMetadata,
+         @Nullable PutOptions putOptions) {
+      return new AutoValue_MultipartUpload(containerName, blobName, id, blobMetadata, putOptions);
    }
 }

@@ -18,9 +18,9 @@ package org.jclouds.blobstore;
 
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.io.BaseEncoding.base16;
-import static org.jclouds.http.Uris.uriBuilder;
 
 import java.io.IOException;
+import java.util.Collection;
 import java.util.Date;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -83,7 +83,7 @@ public class TransientStorageStrategy implements LocalStorageStrategy {
    }
 
    @Override
-   public Iterable<String> getAllContainerNames() {
+   public Collection<String> getAllContainerNames() {
       return containerToBlobs.keySet();
    }
 
@@ -122,7 +122,7 @@ public class TransientStorageStrategy implements LocalStorageStrategy {
    @Override
    public void deleteContainer(final String containerName) {
       containerToBlobs.remove(containerName);
-      containerToBlobAccess.remove(containerToBlobAccess);
+      containerToBlobAccess.remove(containerName);
    }
 
    @Override
@@ -165,6 +165,12 @@ public class TransientStorageStrategy implements LocalStorageStrategy {
       HashingInputStream input = new HashingInputStream(Hashing.md5(), blob.getPayload().openStream());
       try {
          payload = ByteStreams.toByteArray(input);
+         long actualSize = payload.length;
+         Long expectedSize = blob.getMetadata().getContentMetadata().getContentLength();
+         if (expectedSize != null && actualSize != expectedSize) {
+            throw new IOException("Content-Length mismatch, actual: " + actualSize +
+                  " expected: " + expectedSize);
+         }
          actualHashCode = input.hash();
          HashCode expectedHashCode = blob.getPayload().getContentMetadata().getContentMD5AsHashCode();
          if (expectedHashCode != null && !actualHashCode.equals(expectedHashCode)) {
@@ -231,11 +237,10 @@ public class TransientStorageStrategy implements LocalStorageStrategy {
       MutableContentMetadata oldMd = in.getPayload().getContentMetadata();
       HttpUtils.copy(oldMd, payload.getContentMetadata());
       payload.getContentMetadata().setContentMD5(contentMd5);
+      payload.getContentMetadata().setContentLength((long) input.length);
       Blob blob = blobFactory.create(BlobStoreUtils.copy(in.getMetadata()));
       blob.setPayload(payload);
       blob.getMetadata().setContainer(containerName);
-      blob.getMetadata().setUri(
-            uriBuilder(new StringBuilder("mem://").append(containerName)).path(in.getMetadata().getName()).build());
       blob.getMetadata().setLastModified(new Date());
       blob.getMetadata().setSize((long) input.length);
       String eTag = base16().lowerCase().encode(contentMd5.asBytes());

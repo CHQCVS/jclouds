@@ -36,6 +36,7 @@ import org.jclouds.rest.InvocationContext;
 import org.jclouds.rest.internal.GeneratedHttpRequest;
 
 import com.google.common.base.Function;
+import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
 import com.google.common.hash.HashCode;
 import com.google.common.io.ByteSource;
@@ -43,9 +44,12 @@ import com.google.common.io.ByteSource;
 public class ParseObjectListFromResponse implements Function<HttpResponse, ObjectList>,
       InvocationContext<ParseObjectListFromResponse> {
 
+   public static final String SUBDIR_ETAG = "deadbeef";
+
    private static final class InternalObject {
       String name;
       String hash;
+      String subdir;
       long bytes;
       String content_type;
       Date last_modified;
@@ -66,6 +70,7 @@ public class ParseObjectListFromResponse implements Function<HttpResponse, Objec
    @Override
    public ObjectList apply(HttpResponse from) {
       List<SwiftObject> objects = Lists.transform(json.apply(from), toSwiftObject);
+
       Container container = parseContainer.apply(from);
       return ObjectList.create(objects, container);
    }
@@ -79,12 +84,23 @@ public class ParseObjectListFromResponse implements Function<HttpResponse, Objec
 
       @Override
       public SwiftObject apply(InternalObject input) {
+         if (input.subdir != null) {
+            return SwiftObject.builder()
+                  .uri(uriBuilder(containerUri).clearQuery().appendPath(input.subdir).build())
+                  .name(input.subdir)
+                  .etag(SUBDIR_ETAG)
+                  .payload(payload(input.bytes, input.hash, "application/directory", input.expires))
+                  .lastModified(new Date(0)).build();
+         }
+         String name = Strings.nullToEmpty(input.name);
+         String etag = Strings.nullToEmpty(input.hash);
+         Date lastModified = input.last_modified == null ? new Date() : input.last_modified;
          return SwiftObject.builder()
                .uri(uriBuilder(containerUri).clearQuery().appendPath(input.name).build())
-               .name(input.name)
-               .etag(input.hash)
-               .payload(payload(input.bytes, input.hash, input.content_type, input.expires))
-               .lastModified(input.last_modified).build();
+               .name(name)
+               .etag(etag)
+               .payload(payload(input.bytes, etag, input.content_type, input.expires))
+               .lastModified(lastModified).build();
       }
    }
 

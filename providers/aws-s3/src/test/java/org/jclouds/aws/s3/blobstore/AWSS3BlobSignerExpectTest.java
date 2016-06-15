@@ -19,16 +19,19 @@ package org.jclouds.aws.s3.blobstore;
 import static org.testng.Assert.assertEquals;
 
 import org.jclouds.aws.s3.config.AWSS3HttpApiModule;
+import org.jclouds.aws.s3.filters.AWSRequestAuthorizeSignature;
 import org.jclouds.blobstore.BlobStore;
 import org.jclouds.blobstore.domain.Blob;
 import org.jclouds.date.TimeStamp;
 import org.jclouds.http.HttpRequest;
 import org.jclouds.rest.ConfiguresHttpApi;
 import org.jclouds.s3.blobstore.S3BlobSignerExpectTest;
+import org.jclouds.s3.filters.RequestAuthorizeSignature;
 import org.testng.annotations.Test;
 
 import com.google.common.base.Supplier;
 import com.google.inject.Module;
+import com.google.inject.Scopes;
 
 @Test(groups = "unit", testName = "AWSS3BlobSignerExpectTest")
 public class AWSS3BlobSignerExpectTest extends S3BlobSignerExpectTest {
@@ -51,10 +54,12 @@ public class AWSS3BlobSignerExpectTest extends S3BlobSignerExpectTest {
    @Override
    protected HttpRequest getBlobWithTime() {
       return HttpRequest.builder().method("GET")
-         .endpoint("https://container.s3.amazonaws.com/name" +
-            "?Expires=1212683902&AWSAccessKeyId=identity&Signature=Y4Ac4sZfBemGZmgfG78F7IX%2BIFg%3D")
-         .addHeader("Host", "container.s3.amazonaws.com")
-         .addHeader("Date", DATE).build();
+            .endpoint("https://container.s3.amazonaws.com/name")
+            .addQueryParam("Expires", "1212683902")
+            .addQueryParam("AWSAccessKeyId", "identity")
+            .addQueryParam("Signature", "Y4Ac4sZfBemGZmgfG78F7IX+IFg=")
+            .addHeader("Host", "container.s3.amazonaws.com")
+            .addHeader("Date", DATE).build();
    }
 
    @Override
@@ -88,11 +93,14 @@ public class AWSS3BlobSignerExpectTest extends S3BlobSignerExpectTest {
    @Override
    protected HttpRequest putBlobWithTime() {
       return HttpRequest.builder().method("PUT")
-         .endpoint("https://container.s3.amazonaws.com/name" +
-            "?Expires=1212683902&AWSAccessKeyId=identity&Signature=genkB2vLxe3AWV/bPvRTMqQts7E%3D")
-         .addHeader("Expect", "100-continue")
-         .addHeader("Host", "container.s3.amazonaws.com")
-         .addHeader("Date", DATE).build();
+            .endpoint("https://container.s3.amazonaws.com/name")
+            .addQueryParam("Expires", "1212683902")
+            .addQueryParam("AWSAccessKeyId", "identity")
+            .addQueryParam("Signature", "genkB2vLxe3AWV/bPvRTMqQts7E=")
+            .addHeader("Expect", "100-continue")
+            .addHeader("Host", "container.s3.amazonaws.com")
+            .addHeader("Date", DATE)
+            .build();
    }
 
    @Override
@@ -125,6 +133,12 @@ public class AWSS3BlobSignerExpectTest extends S3BlobSignerExpectTest {
       @TimeStamp
       protected String provideTimeStamp(@TimeStamp Supplier<String> cache) {
          return DATE;
+      }
+
+      // subclass expects v2 signatures
+      @Override
+      protected void bindRequestSigner() {
+         bind(RequestAuthorizeSignature.class).to(AWSRequestAuthorizeSignature.class).in(Scopes.SINGLETON);
       }
    }
 }

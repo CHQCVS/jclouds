@@ -21,8 +21,10 @@ import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.Iterables.contains;
 import static com.google.common.collect.Iterables.filter;
 import static com.google.common.collect.Iterables.transform;
+import static java.lang.String.format;
+import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.jclouds.compute.util.ComputeServiceUtils.metadataAndTagsAsCommaDelimitedValue;
-
+import static org.jclouds.util.Predicates2.retry;
 import java.util.Set;
 
 import javax.annotation.Resource;
@@ -37,6 +39,7 @@ import org.jclouds.domain.LoginCredentials;
 import org.jclouds.location.Region;
 import org.jclouds.logging.Logger;
 import org.jclouds.openstack.nova.v2_0.NovaApi;
+import org.jclouds.openstack.nova.v2_0.compute.functions.CleanupServer;
 import org.jclouds.openstack.nova.v2_0.compute.functions.RemoveFloatingIpFromNodeAndDeallocate;
 import org.jclouds.openstack.nova.v2_0.compute.options.NovaTemplateOptions;
 import org.jclouds.openstack.nova.v2_0.compute.strategy.ApplyNovaTemplateOptionsCreateNodesWithGroupEncodedIntoNameThenAddToSet;
@@ -78,16 +81,19 @@ public class NovaComputeServiceAdapter implements
    protected final Supplier<Set<String>> regionIds;
    protected final RemoveFloatingIpFromNodeAndDeallocate removeFloatingIpFromNodeAndDeallocate;
    protected final LoadingCache<RegionAndName, KeyPair> keyPairCache;
+   protected final CleanupServer cleanupServer;
+
 
    @Inject
    public NovaComputeServiceAdapter(NovaApi novaApi, @Region Supplier<Set<String>> regionIds,
             RemoveFloatingIpFromNodeAndDeallocate removeFloatingIpFromNodeAndDeallocate,
-            LoadingCache<RegionAndName, KeyPair> keyPairCache) {
+            LoadingCache<RegionAndName, KeyPair> keyPairCache, CleanupServer cleanupServer) {
       this.novaApi = checkNotNull(novaApi, "novaApi");
       this.regionIds = checkNotNull(regionIds, "regionIds");
       this.removeFloatingIpFromNodeAndDeallocate = checkNotNull(removeFloatingIpFromNodeAndDeallocate,
                "removeFloatingIpFromNodeAndDeallocate");
       this.keyPairCache = checkNotNull(keyPairCache, "keyPairCache");
+      this.cleanupServer = checkNotNull(cleanupServer, "cleanupServer");
    }
 
    /**
@@ -130,16 +136,28 @@ public class NovaComputeServiceAdapter implements
          }
       }
 
-      String regionId = template.getLocation().getId();
+
+      final String regionId = template.getLocation().getId();
       String imageId = template.getImage().getProviderId();
       String flavorId = template.getHardware().getProviderId();
 
       logger.debug(">> creating new server region(%s) name(%s) image(%s) flavor(%s) options(%s)", regionId, name, imageId, flavorId, options);
-      ServerCreated lightweightServer = novaApi.getServerApi(regionId).create(name, imageId, flavorId, options);
+      final ServerCreated lightweightServer = novaApi.getServerApi(regionId).create(name, imageId, flavorId, options);
+      if (!retry(new Predicate<String>() {
+         @Override
+         public boolean apply(String serverId) {
+            Server server = novaApi.getServerApi(regionId).get(serverId);
+            return server != null && server.getAddresses() != null && !server.getAddresses().isEmpty();
+         }
+      }, 30 * 60, 1, SECONDS).apply(lightweightServer.getId())) {
+         final String message = format("Server %s was not created within %sms so it will be destroyed.", name, "30 * 60");
+         logger.warn(message);
+         destroyNode(lightweightServer.getId());
+         throw new IllegalStateException(message);
+      }
+      logger.trace("<< server(%s)", lightweightServer.getId());
+
       Server server = novaApi.getServerApi(regionId).get(lightweightServer.getId());
-
-      logger.trace("<< server(%s)", server.getId());
-
       ServerInRegion serverInRegion = new ServerInRegion(server, regionId);
       if (!privateKey.isPresent() && lightweightServer.getAdminPass().isPresent())
          credentialsBuilder.password(lightweightServer.getAdminPass().get());
@@ -147,7 +165,7 @@ public class NovaComputeServiceAdapter implements
                .build());
    }
 
-   @Override
+  @Override
    public Iterable<FlavorInRegion> listHardwareProfiles() {
       Builder<FlavorInRegion> builder = ImmutableSet.builder();
       for (final String regionId : regionIds.get()) {
@@ -251,15 +269,7 @@ public class NovaComputeServiceAdapter implements
 
    @Override
    public void destroyNode(String id) {
-      RegionAndId regionAndId = RegionAndId.fromSlashEncoded(id);
-      if (novaApi.getFloatingIPApi(regionAndId.getRegion()).isPresent()) {
-         try {
-            removeFloatingIpFromNodeAndDeallocate.apply(regionAndId);
-         } catch (RuntimeException e) {
-            logger.warn(e, "<< error removing and deallocating ip from node(%s): %s", id, e.getMessage());
-         }
-      }
-      novaApi.getServerApi(regionAndId.getRegion()).delete(regionAndId.getId());
+      checkState(cleanupServer.apply(id), "server(%s) still there after deleting!?", id);
    }
 
    @Override

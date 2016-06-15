@@ -20,6 +20,7 @@ import static org.jclouds.reflect.Reflection2.method;
 import static org.testng.Assert.assertEquals;
 
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.Map;
 
 import org.jclouds.Fallbacks.VoidOnNotFoundOr404;
@@ -68,6 +69,7 @@ import org.jclouds.s3.xml.BucketLoggingHandler;
 import org.jclouds.s3.xml.CopyObjectHandler;
 import org.jclouds.s3.xml.ListAllMyBucketsHandler;
 import org.jclouds.s3.xml.ListBucketHandler;
+import org.jclouds.s3.xml.ListMultipartUploadsHandler;
 import org.jclouds.s3.xml.LocationConstraintHandler;
 import org.jclouds.s3.xml.PayerHandler;
 import org.jclouds.util.Strings2;
@@ -377,6 +379,23 @@ public abstract class S3ClientTest<T extends S3Client> extends BaseS3ClientTest<
       checkFilters(request);
    }
 
+   public void testUpdateBucketCannedACL() throws Exception {
+      Invokable<?, ?> method = method(S3Client.class, "updateBucketCannedACL", String.class, CannedAccessPolicy.class);
+      GeneratedHttpRequest request = processor.createRequest(method, ImmutableList.<Object> of("bucket", CannedAccessPolicy.PUBLIC_READ));
+
+      assertRequestLineEquals(request, "PUT https://bucket." + url + "/?acl HTTP/1.1");
+      assertNonPayloadHeadersEqual(request,
+            "Host: bucket." + url + "\n" +
+            "x-amz-acl: public-read\n");
+      assertPayloadEquals(request, null, "text/xml", false);
+
+      assertResponseParserClassEquals(method, request, ReturnTrueIf2xx.class);
+      assertSaxResponseParserClassEquals(method, null);
+      assertFallbackClassEquals(method, null);
+
+      checkFilters(request);
+   }
+
    public void testPutBucketDefault() throws ArrayIndexOutOfBoundsException, SecurityException,
             IllegalArgumentException, NoSuchMethodException, IOException {
       Invokable<?, ?> method = method(S3Client.class, "putBucketInRegion", String.class, String.class,
@@ -425,6 +444,24 @@ public abstract class S3ClientTest<T extends S3Client> extends BaseS3ClientTest<
                         + url
                         + "/doc/2006-03-01/\"><Owner><ID>1234</ID></Owner><AccessControlList><Grant><Grantee xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:type=\"CanonicalUser\"><ID>1234</ID></Grantee><Permission>FULL_CONTROL</Permission></Grant></AccessControlList></AccessControlPolicy>",
                "text/xml", false);
+
+      assertResponseParserClassEquals(method, request, ReturnTrueIf2xx.class);
+      assertSaxResponseParserClassEquals(method, null);
+      assertFallbackClassEquals(method, null);
+
+      checkFilters(request);
+   }
+
+   public void testUpdateObjectCannedACL() throws SecurityException, NoSuchMethodException, IOException {
+      Invokable<?, ?> method = method(S3Client.class, "updateObjectCannedACL", String.class, String.class, CannedAccessPolicy.class);
+      GeneratedHttpRequest request = processor.createRequest(
+              method, ImmutableList.<Object> of("bucket", "key", CannedAccessPolicy.PUBLIC_READ));
+
+      assertRequestLineEquals(request, "PUT https://bucket." + url + "/key?acl HTTP/1.1");
+      assertNonPayloadHeadersEqual(request,
+            "Host: bucket." + url + "\n" +
+            "x-amz-acl: public-read\n");
+      assertPayloadEquals(request, null, "text/xml", false);
 
       assertResponseParserClassEquals(method, request, ReturnTrueIf2xx.class);
       assertSaxResponseParserClassEquals(method, null);
@@ -550,6 +587,25 @@ public abstract class S3ClientTest<T extends S3Client> extends BaseS3ClientTest<
       checkFilters(request);
    }
 
+   public void testUploadPartCopy() throws SecurityException, NegativeArraySizeException, NoSuchMethodException {
+      Invokable<?, ?> method = method(S3Client.class, "uploadPartCopy", String.class, String.class, int.class,
+            String.class, String.class, String.class, long.class, long.class);
+      GeneratedHttpRequest request = processor.createRequest(method, ImmutableList.<Object> of("bucket", "foo", 1, "asdsadasdas",
+            "anotherBucket", "anotherObject", 2, 10 * 1024 * 1024));
+
+      assertRequestLineEquals(request, "PUT https://bucket." + url + "/foo?partNumber=1&uploadId=asdsadasdas HTTP/1.1");
+      assertNonPayloadHeadersEqual(request, "Host: bucket." + url + "\n" +
+            "x-amz-copy-source: /anotherBucket/anotherObject\n" +
+            "x-amz-copy-source-range: bytes=2-10485760\n");
+      assertPayloadEquals(request, null, "application/unknown", false);
+
+      assertResponseParserClassEquals(method, request, ETagFromHttpResponseViaRegex.class);
+      assertSaxResponseParserClassEquals(method, null);
+      assertFallbackClassEquals(method, MapHttp4xxCodesToExceptions.class);
+
+      checkFilters(request);
+   }
+
    public void testCompleteMultipartUpload() throws SecurityException, NegativeArraySizeException,
          NoSuchMethodException {
       Invokable<?, ?> method = method(S3Client.class, "completeMultipartUpload", String.class, String.class,
@@ -566,6 +622,22 @@ public abstract class S3ClientTest<T extends S3Client> extends BaseS3ClientTest<
 
       assertResponseParserClassEquals(method, request, ETagFromHttpResponseViaRegex.class);
       assertSaxResponseParserClassEquals(method, null);
+      assertFallbackClassEquals(method, MapHttp4xxCodesToExceptions.class);
+
+      checkFilters(request);
+   }
+
+   public void testListMultipartUploads() throws Exception {
+      Invokable<?, ?> method = method(S3Client.class, "listMultipartUploads", String.class, String.class,
+            Integer.class, String.class, String.class, String.class);
+      GeneratedHttpRequest request = processor.createRequest(method, Arrays.<Object> asList("bucket", null, null, null, null, null));
+
+      assertRequestLineEquals(request, "GET https://bucket." + url + "/?uploads HTTP/1.1");
+      assertNonPayloadHeadersEqual(request, "Host: bucket." + url + "\n");
+      assertPayloadEquals(request, null, "application/unknown", false);
+
+      assertResponseParserClassEquals(method, request, ParseSax.class);
+      assertSaxResponseParserClassEquals(method, ListMultipartUploadsHandler.class);
       assertFallbackClassEquals(method, MapHttp4xxCodesToExceptions.class);
 
       checkFilters(request);

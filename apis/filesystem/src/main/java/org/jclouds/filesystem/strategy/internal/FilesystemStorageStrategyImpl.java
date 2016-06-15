@@ -21,8 +21,10 @@ import static com.google.common.base.Strings.isNullOrEmpty;
 import static com.google.common.io.BaseEncoding.base16;
 import static java.nio.file.Files.getFileAttributeView;
 import static java.nio.file.Files.getPosixFilePermissions;
+import static java.nio.file.Files.probeContentType;
 import static java.nio.file.Files.readAttributes;
 import static java.nio.file.Files.setPosixFilePermissions;
+import static org.jclouds.filesystem.util.Utils.delete;
 import static org.jclouds.filesystem.util.Utils.isPrivate;
 import static org.jclouds.filesystem.util.Utils.isWindows;
 import static org.jclouds.filesystem.util.Utils.setPrivate;
@@ -33,13 +35,16 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.UserDefinedFileAttributeView;
+import java.util.Collection;
 import java.util.Date;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 
 import javax.annotation.Resource;
 import javax.inject.Inject;
@@ -69,6 +74,7 @@ import org.jclouds.logging.Logger;
 import org.jclouds.rest.annotations.ParamValidators;
 
 import com.google.common.base.Function;
+import com.google.common.base.Supplier;
 import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
@@ -91,6 +97,7 @@ import com.google.common.primitives.Longs;
  */
 public class FilesystemStorageStrategyImpl implements LocalStorageStrategy {
 
+   private static final String XATTR_CACHE_CONTROL = "user.cache-control";
    private static final String XATTR_CONTENT_DISPOSITION = "user.content-disposition";
    private static final String XATTR_CONTENT_ENCODING = "user.content-encoding";
    private static final String XATTR_CONTENT_LANGUAGE = "user.content-language";
@@ -108,19 +115,25 @@ public class FilesystemStorageStrategyImpl implements LocalStorageStrategy {
 
    protected final Provider<BlobBuilder> blobBuilders;
    protected final String baseDirectory;
+   protected final boolean autoDetectContentType;
    protected final FilesystemContainerNameValidator filesystemContainerNameValidator;
    protected final FilesystemBlobKeyValidator filesystemBlobKeyValidator;
+   private final Supplier<Location> defaultLocation;
 
    @Inject
    protected FilesystemStorageStrategyImpl(Provider<BlobBuilder> blobBuilders,
          @Named(FilesystemConstants.PROPERTY_BASEDIR) String baseDir,
+         @Named(FilesystemConstants.PROPERTY_AUTO_DETECT_CONTENT_TYPE) boolean autoDetectContentType,
          FilesystemContainerNameValidator filesystemContainerNameValidator,
-         FilesystemBlobKeyValidator filesystemBlobKeyValidator) {
+         FilesystemBlobKeyValidator filesystemBlobKeyValidator,
+         Supplier<Location> defaultLocation) {
       this.blobBuilders = checkNotNull(blobBuilders, "filesystem storage strategy blobBuilders");
       this.baseDirectory = checkNotNull(baseDir, "filesystem storage strategy base directory");
+      this.autoDetectContentType = autoDetectContentType;
       this.filesystemContainerNameValidator = checkNotNull(filesystemContainerNameValidator,
             "filesystem container name validator");
       this.filesystemBlobKeyValidator = checkNotNull(filesystemBlobKeyValidator, "filesystem blob key validator");
+      this.defaultLocation = defaultLocation;
    }
 
    @Override
@@ -130,7 +143,7 @@ public class FilesystemStorageStrategyImpl implements LocalStorageStrategy {
    }
 
    @Override
-   public Iterable<String> getAllContainerNames() {
+   public Collection<String> getAllContainerNames() {
       File[] files = new File(buildPathStartingFromBaseDir()).listFiles();
       if (files == null) {
          return ImmutableList.of();
@@ -257,6 +270,8 @@ public class FilesystemStorageStrategyImpl implements LocalStorageStrategy {
       BasicFileAttributes attr;
       try {
          attr = readAttributes(path, BasicFileAttributes.class);
+      } catch (NoSuchFileException nsfe) {
+         return null;
       } catch (IOException e) {
          throw Throwables.propagate(e);
       }
@@ -319,6 +334,7 @@ public class FilesystemStorageStrategyImpl implements LocalStorageStrategy {
          byteSource = Files.asByteSource(file);
       }
       try {
+         String cacheControl = null;
          String contentDisposition = null;
          String contentEncoding = null;
          String contentLanguage = null;
@@ -331,10 +347,14 @@ public class FilesystemStorageStrategyImpl implements LocalStorageStrategy {
          if (view != null) {
             Set<String> attributes = ImmutableSet.copyOf(view.list());
 
+            cacheControl = readStringAttributeIfPresent(view, attributes, XATTR_CACHE_CONTROL);
             contentDisposition = readStringAttributeIfPresent(view, attributes, XATTR_CONTENT_DISPOSITION);
             contentEncoding = readStringAttributeIfPresent(view, attributes, XATTR_CONTENT_ENCODING);
             contentLanguage = readStringAttributeIfPresent(view, attributes, XATTR_CONTENT_LANGUAGE);
             contentType = readStringAttributeIfPresent(view, attributes, XATTR_CONTENT_TYPE);
+            if (contentType == null && autoDetectContentType) {
+               contentType = probeContentType(file.toPath());
+            }
             if (attributes.contains(XATTR_CONTENT_MD5)) {
                ByteBuffer buf = ByteBuffer.allocate(view.size(XATTR_CONTENT_MD5));
                view.read(XATTR_CONTENT_MD5, buf);
@@ -355,6 +375,7 @@ public class FilesystemStorageStrategyImpl implements LocalStorageStrategy {
             }
 
             builder.payload(byteSource)
+               .cacheControl(cacheControl)
                .contentDisposition(contentDisposition)
                .contentEncoding(contentEncoding)
                .contentLanguage(contentLanguage)
@@ -382,6 +403,7 @@ public class FilesystemStorageStrategyImpl implements LocalStorageStrategy {
 
    private void writeCommonMetadataAttr(UserDefinedFileAttributeView view, Blob blob) throws IOException {
       ContentMetadata metadata = blob.getMetadata().getContentMetadata();
+      writeStringAttributeIfPresent(view, XATTR_CACHE_CONTROL, metadata.getCacheControl());
       writeStringAttributeIfPresent(view, XATTR_CONTENT_DISPOSITION, metadata.getContentDisposition());
       writeStringAttributeIfPresent(view, XATTR_CONTENT_ENCODING, metadata.getContentEncoding());
       writeStringAttributeIfPresent(view, XATTR_CONTENT_LANGUAGE, metadata.getContentLanguage());
@@ -436,13 +458,20 @@ public class FilesystemStorageStrategyImpl implements LocalStorageStrategy {
          return putDirectoryBlob(containerName, blob);
       }
       File outputFile = getFileForBlobKey(containerName, blobKey);
-      Path outputPath = outputFile.toPath();
+      // TODO: should we use a known suffix to filter these out during list?
+      String tmpBlobName = blobKey + "-" + UUID.randomUUID();
+      File tmpFile = getFileForBlobKey(containerName, tmpBlobName);
+      Path tmpPath = tmpFile.toPath();
       HashingInputStream his = null;
       try {
-         Files.createParentDirs(outputFile);
+         Files.createParentDirs(tmpFile);
          his = new HashingInputStream(Hashing.md5(), payload.openStream());
-         outputFile.delete();
-         Files.asByteSink(outputFile).writeFrom(his);
+         long actualSize = Files.asByteSink(tmpFile).writeFrom(his);
+         Long expectedSize = blob.getMetadata().getContentMetadata().getContentLength();
+         if (expectedSize != null && actualSize != expectedSize) {
+            throw new IOException("Content-Length mismatch, actual: " + actualSize +
+                  " expected: " + expectedSize);
+         }
          HashCode actualHashCode = his.hash();
          HashCode expectedHashCode = payload.getContentMetadata().getContentMD5AsHashCode();
          if (expectedHashCode != null && !actualHashCode.equals(expectedHashCode)) {
@@ -451,25 +480,36 @@ public class FilesystemStorageStrategyImpl implements LocalStorageStrategy {
          }
          payload.getContentMetadata().setContentMD5(actualHashCode);
 
-         UserDefinedFileAttributeView view = getUserDefinedFileAttributeView(outputPath);
+         if (outputFile.exists()) {
+            delete(outputFile);
+         }
+
+         UserDefinedFileAttributeView view = getUserDefinedFileAttributeView(tmpPath);
          if (view != null) {
             try {
                view.write(XATTR_CONTENT_MD5, ByteBuffer.wrap(actualHashCode.asBytes()));
                writeCommonMetadataAttr(view, blob);
             } catch (IOException e) {
-               logger.debug("xattrs not supported on %s", outputPath);
+               logger.debug("xattrs not supported on %s", tmpPath);
             }
          }
-         setBlobAccess(containerName, blobKey, BlobAccess.PRIVATE);
+
+         setBlobAccess(containerName, tmpBlobName, BlobAccess.PRIVATE);
+
+         if (!tmpFile.renameTo(outputFile)) {
+            throw new IOException("Could not rename file " + tmpFile + " to " + outputFile);
+         }
+         tmpFile = null;
+
          return base16().lowerCase().encode(actualHashCode.asBytes());
-      } catch (IOException ex) {
-         if (outputFile != null) {
-            if (!outputFile.delete()) {
-               logger.debug("Could not delete %s", outputFile);
+      } finally {
+         if (tmpFile != null) {
+            try {
+               delete(tmpFile);
+            } catch (IOException e) {
+               logger.debug("Could not delete %s: %s", tmpFile, e);
             }
          }
-         throw ex;
-      } finally {
          closeQuietly(his);
          if (payload != null) {
             payload.release();
@@ -484,21 +524,24 @@ public class FilesystemStorageStrategyImpl implements LocalStorageStrategy {
       String fileName = buildPathStartingFromBaseDir(container, blobKey);
       logger.debug("Deleting blob %s", fileName);
       File fileToBeDeleted = new File(fileName);
-      if (!fileToBeDeleted.delete()) {
-         if (fileToBeDeleted.isDirectory()) {
-            try {
-               UserDefinedFileAttributeView view = getUserDefinedFileAttributeView(fileToBeDeleted.toPath());
-               if (view != null) {
-                  for (String s : view.list()) {
-                     view.delete(s);
-                  }
+
+      if (fileToBeDeleted.isDirectory()) {
+         try {
+            UserDefinedFileAttributeView view = getUserDefinedFileAttributeView(fileToBeDeleted.toPath());
+            if (view != null) {
+               for (String s : view.list()) {
+                  view.delete(s);
                }
-            } catch (IOException e) {
-               logger.debug("Could not delete attributes from %s", fileToBeDeleted);
             }
-         } else {
-            logger.debug("Could not delete %s", fileToBeDeleted);
+         } catch (IOException e) {
+            logger.debug("Could not delete attributes from %s: %s", fileToBeDeleted, e);
          }
+      }
+
+      try {
+         delete(fileToBeDeleted);
+      } catch (IOException e) {
+         logger.debug("Could not delete %s: %s", fileToBeDeleted, e);
       }
 
       // now examine if the key of the blob is a complex key (with a directory structure)
@@ -563,7 +606,7 @@ public class FilesystemStorageStrategyImpl implements LocalStorageStrategy {
 
    @Override
    public Location getLocation(final String containerName) {
-      return null;
+      return defaultLocation.get();
    }
 
    @Override
@@ -724,10 +767,10 @@ public class FilesystemStorageStrategyImpl implements LocalStorageStrategy {
    }
 
    /**
-    * Remove leading and trailing {@link File.separator} character from the string.
+    * Remove leading and trailing separator character from the string.
     *
     * @param pathToBeCleaned
-    * @param remove
+    * @param onlyTrailing
     *           only trailing separator char from path
     * @return
     */
@@ -754,7 +797,7 @@ public class FilesystemStorageStrategyImpl implements LocalStorageStrategy {
     * empty
     *
     * @param container
-    * @param normalizedKey
+    * @param blobKey
     */
    private void removeDirectoriesTreeOfBlobKey(String container, String blobKey) {
       String normalizedBlobKey = denormalize(blobKey);
@@ -771,10 +814,24 @@ public class FilesystemStorageStrategyImpl implements LocalStorageStrategy {
       if (!isNullOrEmpty(parentPath)) {
          // remove parent directory only it's empty
          File directory = new File(buildPathStartingFromBaseDir(container, parentPath));
+         // don't delete directory if it's a directory blob
+         try {
+            UserDefinedFileAttributeView view = getUserDefinedFileAttributeView(directory.toPath());
+            if (view == null) { // OSX HFS+ does not support UserDefinedFileAttributeView
+                logger.debug("Could not look for attributes from %s", directory);
+            } else if (!view.list().isEmpty()) {
+               return;
+            }
+         } catch (IOException e) {
+            logger.debug("Could not look for attributes from %s: %s", directory, e);
+         }
+
          String[] children = directory.list();
          if (null == children || children.length == 0) {
-            if (!directory.delete()) {
-               logger.debug("Could not delete %s", directory);
+            try {
+               delete(directory);
+            } catch (IOException e) {
+               logger.debug("Could not delete %s: %s", directory, e);
                return;
             }
             // recursively call for removing other path

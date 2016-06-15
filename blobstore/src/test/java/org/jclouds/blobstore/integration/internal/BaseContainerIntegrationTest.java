@@ -30,7 +30,9 @@ import static org.testng.Assert.assertTrue;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.HashSet;
 import java.util.Iterator;
+import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -46,9 +48,13 @@ import org.jclouds.blobstore.domain.ContainerAccess;
 import org.jclouds.blobstore.domain.PageSet;
 import org.jclouds.blobstore.domain.StorageMetadata;
 import org.jclouds.blobstore.options.ListContainerOptions;
+import org.jclouds.http.HttpRequest;
+import org.jclouds.http.HttpResponse;
+import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
 
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.io.ByteSource;
 import com.google.common.util.concurrent.Uninterruptibles;
 
@@ -56,8 +62,10 @@ public class BaseContainerIntegrationTest extends BaseBlobStoreIntegrationTest {
 
    @Test(groups = { "integration", "live" })
    public void containerDoesntExist() {
-      assert !view.getBlobStore().containerExists("forgetaboutit");
-      assert !view.getBlobStore().containerExists("cloudcachestorefunctionalintegrationtest-first");
+      Random random = new Random();
+      assert !view.getBlobStore().containerExists("forgetaboutit" + random.nextInt(Integer.MAX_VALUE));
+      assert !view.getBlobStore().containerExists("cloudcachestorefunctionalintegrationtest-first" +
+            random.nextInt(Integer.MAX_VALUE));
    }
 
    @Test(groups = { "integration", "live" })
@@ -184,7 +192,6 @@ public class BaseContainerIntegrationTest extends BaseBlobStoreIntegrationTest {
          assert container.size() == 25 : String.format("size should have been 25, but was %d: %s", container.size(),
                container);
          assert container.getNextMarker() == null;
-
       } finally {
          returnContainer(containerName);
       }
@@ -234,9 +241,9 @@ public class BaseContainerIntegrationTest extends BaseBlobStoreIntegrationTest {
          awaitConsistency();
 
          container = view.getBlobStore().list(containerName);
-         // we should still have only the directory under root
+         // we should get back the subdir entry and the directory marker
          assert container.getNextMarker() == null;
-         assert container.size() == 1 : container;
+         assertThat(container).hasSize(2);
 
          container = view.getBlobStore().list(containerName, inDirectory(directory));
          // we should have only the 10 items under the directory
@@ -255,12 +262,12 @@ public class BaseContainerIntegrationTest extends BaseBlobStoreIntegrationTest {
          awaitConsistency();
 
          assert view.getBlobStore().directoryExists(containerName, directory);
-         assert view.getBlobStore().directoryExists(containerName, directory + "/" + directory);
+         assertThat(view.getBlobStore().directoryExists(containerName, directory + "/" + directory)).isFalse();
 
          // should have only the 2 level-deep directory above
          container = view.getBlobStore().list(containerName, inDirectory(directory));
          assert container.getNextMarker() == null;
-         assert container.size() == 1 : container;
+         assertThat(container).hasSize(0);
 
          view.getBlobStore().createDirectory(containerName, directory + "/" + directory);
 
@@ -301,7 +308,8 @@ public class BaseContainerIntegrationTest extends BaseBlobStoreIntegrationTest {
          addTenObjectsUnderPrefix(containerName, prefix);
          add15UnderRoot(containerName);
          awaitConsistency();
-         PageSet<? extends StorageMetadata> container = view.getBlobStore().list(containerName, inDirectory(prefix));
+         PageSet<? extends StorageMetadata> container = view.getBlobStore().list(
+               containerName, new ListContainerOptions().recursive().prefix(prefix));
          assert container.getNextMarker() == null;
          assertEquals(container.size(), 10);
       } finally {
@@ -356,18 +364,18 @@ public class BaseContainerIntegrationTest extends BaseBlobStoreIntegrationTest {
          pageSet = view.getBlobStore().list(containerName, options);
          assertThat(pageSet).hasSize(1);
          assertThat(pageSet.iterator().next().getName()).isEqualTo("asdf");
-         assertThat(pageSet.getNextMarker()).isEqualTo("asdf");
+         assertThat(pageSet.getNextMarker()).isNotNull();
 
          options.afterMarker(pageSet.getNextMarker());
          pageSet = view.getBlobStore().list(containerName, options);
          assertThat(pageSet).hasSize(1);
-         assertThat(pageSet.iterator().next().getName()).isEqualTo("boo");
-         assertThat(pageSet.getNextMarker()).isEqualTo("boo/");
+         assertThat(pageSet.iterator().next().getName()).isEqualTo("boo/");
+         assertThat(pageSet.getNextMarker()).isNotNull();
 
          options.afterMarker(pageSet.getNextMarker());
          pageSet = view.getBlobStore().list(containerName, options);
          assertThat(pageSet).hasSize(1);
-         assertThat(pageSet.iterator().next().getName()).isEqualTo("cquux");
+         assertThat(pageSet.iterator().next().getName()).isEqualTo("cquux/");
          assertThat(pageSet.getNextMarker()).isNull();
 
          // list child directory with marker
@@ -375,12 +383,12 @@ public class BaseContainerIntegrationTest extends BaseBlobStoreIntegrationTest {
          pageSet = view.getBlobStore().list(containerName, options);
          assertThat(pageSet).hasSize(1);
          assertThat(pageSet.iterator().next().getName()).isEqualTo("boo/bar");
-         assertThat(pageSet.getNextMarker()).isEqualTo("boo/bar");
+         assertThat(pageSet.getNextMarker()).isNotNull();
 
          options.afterMarker(pageSet.getNextMarker());
          pageSet = view.getBlobStore().list(containerName, options);
          assertThat(pageSet).hasSize(1);
-         assertThat(pageSet.iterator().next().getName()).isEqualTo("boo/baz");
+         assertThat(pageSet.iterator().next().getName()).isEqualTo("boo/baz/");
          assertThat(pageSet.getNextMarker()).isNull();
 
          // list child directory without marker
@@ -389,7 +397,7 @@ public class BaseContainerIntegrationTest extends BaseBlobStoreIntegrationTest {
          assertThat(pageSet).hasSize(2);
          Iterator<? extends StorageMetadata> it = pageSet.iterator();
          assertThat(it.next().getName()).isEqualTo("boo/bar");
-         assertThat(it.next().getName()).isEqualTo("boo/baz");
+         assertThat(it.next().getName()).isEqualTo("boo/baz/");
          assertThat(pageSet.getNextMarker()).isNull();
       } finally {
          returnContainer(containerName);
@@ -509,11 +517,97 @@ public class BaseContainerIntegrationTest extends BaseBlobStoreIntegrationTest {
          blobStore.setContainerAccess(containerName, ContainerAccess.PUBLIC_READ);
          assertThat(blobStore.getContainerAccess(containerName)).isEqualTo(ContainerAccess.PUBLIC_READ);
 
+         String blobName = "blob";
+         blobStore.putBlob(containerName, blobStore.blobBuilder(blobName).payload("").build());
+
+         // test that blob is anonymously readable
+         HttpRequest request = view.getSigner().signGetBlob(containerName, blobName).toBuilder()
+                .replaceQueryParams(ImmutableMap.<String, String>of()).build();
+         HttpResponse response = view.utils().http().invoke(request);
+         assertThat(response.getStatusCode()).isEqualTo(200);
+
          blobStore.setContainerAccess(containerName, ContainerAccess.PRIVATE);
          assertThat(blobStore.getContainerAccess(containerName)).isEqualTo(ContainerAccess.PRIVATE);
       } finally {
          recycleContainerAndAddToPool(containerName);
       }
+   }
+
+   @Test(groups = {"integration", "live"})
+   public void testContainerListWithPrefix() throws InterruptedException {
+      final String containerName = getContainerName();
+      BlobStore blobStore = view.getBlobStore();
+      String prefix = "blob";
+      try {
+         blobStore.putBlob(containerName, blobStore.blobBuilder(prefix).payload("").build());
+         blobStore.putBlob(containerName, blobStore.blobBuilder(prefix + "foo").payload("").build());
+         blobStore.putBlob(containerName, blobStore.blobBuilder(prefix + "bar").payload("").build());
+         blobStore.putBlob(containerName, blobStore.blobBuilder("foo").payload("").build());
+         checkEqualNames(ImmutableSet.of(prefix, prefix + "foo", prefix + "bar"),
+               blobStore.list(containerName, ListContainerOptions.Builder.prefix(prefix)));
+      }
+      finally {
+         returnContainer(containerName);
+      }
+   }
+
+   @Test(groups = {"integration", "live"})
+   public void testDelimiterList() throws InterruptedException {
+      final String containerName = getContainerName();
+      BlobStore blobStore = view.getBlobStore();
+      String payload = "foo";
+      try {
+         blobStore.putBlob(containerName, blobStore.blobBuilder("test-foo-foo").payload(payload).build());
+         blobStore.putBlob(containerName, blobStore.blobBuilder("test-bar-foo").payload(payload).build());
+         blobStore.putBlob(containerName, blobStore.blobBuilder("foo").payload(payload).build());
+         // NOTE: the test does not work if we use a file separator character ("/" or "\"), as the file system blob
+         // store will create directories when putting such a blob. When listing results, these directories will also
+         // show up in the result set.
+         checkEqualNames(ImmutableSet.of("foo", "test-"), blobStore.list(containerName,
+               ListContainerOptions.Builder.delimiter("-")));
+         checkEqualNames(ImmutableSet.of("test-foo-foo", "test-bar-foo", "foo"),
+               blobStore.list(containerName, ListContainerOptions.Builder.delimiter(".")));
+
+         blobStore.putBlob(containerName, blobStore.blobBuilder("bar").payload(payload).build());
+         blobStore.putBlob(containerName, blobStore.blobBuilder("bazar").payload(payload).build());
+         checkEqualNames(ImmutableSet.of("bar", "baza"), blobStore.list(containerName,
+               ListContainerOptions.Builder.delimiter("a").prefix("ba")));
+      } finally {
+         returnContainer(containerName);
+      }
+   }
+
+   @DataProvider
+   public Object[][] getBlobsToEscape() {
+      ImmutableSet<String> testNames = ImmutableSet.of("%20", "%20 ", " %20", " ");
+      Object[][] result = new Object[1][1];
+      result[0][0] = testNames;
+      return result;
+   }
+
+   @Test(dataProvider = "getBlobsToEscape", groups = {"integration", "live"})
+   public void testBlobNameEscaping(Set<String> blobNames) throws InterruptedException {
+      final String containerName = getContainerName();
+      BlobStore blobStore = view.getBlobStore();
+      try {
+         for (String name : blobNames) {
+            Blob blob = blobStore.blobBuilder(name).payload(ByteSource.wrap("test".getBytes())).contentLength(4)
+                  .build();
+            blobStore.putBlob(containerName, blob);
+         }
+         checkEqualNames(blobNames, blobStore.list(containerName));
+      } finally {
+         returnContainer(containerName);
+      }
+   }
+
+   private void checkEqualNames(Set<String> expectedSet, PageSet<? extends StorageMetadata> results) {
+      Set<String> names = new HashSet<String>();
+      for (StorageMetadata sm : results) {
+         names.add(sm.getName());
+      }
+
+      assertThat(names).containsOnlyElementsOf(expectedSet);
    }
 
    protected void addAlphabetUnderRoot(String containerName) throws InterruptedException {
@@ -553,7 +647,7 @@ public class BaseContainerIntegrationTest extends BaseBlobStoreIntegrationTest {
 
    protected void awaitConsistency() {
       if (view.getConsistencyModel() == ConsistencyModel.EVENTUAL) {
-         Uninterruptibles.sleepUninterruptibly(10, TimeUnit.SECONDS);
+         Uninterruptibles.sleepUninterruptibly(AWAIT_CONSISTENCY_TIMEOUT_SECONDS, TimeUnit.SECONDS);
       }
    }
 }

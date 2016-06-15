@@ -20,13 +20,13 @@ import static com.google.common.base.Preconditions.checkNotNull;
 import static org.jclouds.azure.storage.options.ListOptions.Builder.includeMetadata;
 
 import java.net.URI;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
 import javax.inject.Inject;
-import javax.inject.Provider;
 import javax.inject.Singleton;
 
 import org.jclouds.azure.storage.domain.BoundedSet;
@@ -37,11 +37,13 @@ import org.jclouds.azureblob.blobstore.functions.BlobToAzureBlob;
 import org.jclouds.azureblob.blobstore.functions.ContainerToResourceMetadata;
 import org.jclouds.azureblob.blobstore.functions.ListBlobsResponseToResourceList;
 import org.jclouds.azureblob.blobstore.functions.ListOptionsToListBlobsOptions;
-import org.jclouds.azureblob.blobstore.strategy.MultipartUploadStrategy;
 import org.jclouds.azureblob.domain.AzureBlob;
 import org.jclouds.azureblob.domain.BlobBlockProperties;
+import org.jclouds.azureblob.domain.BlobProperties;
 import org.jclouds.azureblob.domain.ContainerProperties;
 import org.jclouds.azureblob.domain.ListBlobBlocksResponse;
+import org.jclouds.azureblob.domain.ListBlobsInclude;
+import org.jclouds.azureblob.domain.ListBlobsResponse;
 import org.jclouds.azureblob.domain.PublicAccess;
 import org.jclouds.azureblob.options.CopyBlobOptions;
 import org.jclouds.azureblob.options.ListBlobsOptions;
@@ -68,9 +70,9 @@ import org.jclouds.domain.Location;
 import org.jclouds.http.options.GetOptions;
 import org.jclouds.io.ContentMetadata;
 import org.jclouds.io.MutableContentMetadata;
+import org.jclouds.io.PayloadSlicer;
 
 import com.google.common.base.Function;
-import com.google.common.base.Optional;
 import com.google.common.base.Supplier;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
@@ -89,18 +91,17 @@ public class AzureBlobStore extends BaseBlobStore {
    private final BlobToAzureBlob blob2AzureBlob;
    private final BlobPropertiesToBlobMetadata blob2BlobMd;
    private final BlobToHttpGetOptions blob2ObjectGetOptions;
-   private final Provider<MultipartUploadStrategy> multipartUploadStrategy;
 
 
    @Inject
    AzureBlobStore(BlobStoreContext context, BlobUtils blobUtils, Supplier<Location> defaultLocation,
-            @Memoized Supplier<Set<? extends Location>> locations, AzureBlobClient sync,
+            @Memoized Supplier<Set<? extends Location>> locations, PayloadSlicer slicer, AzureBlobClient sync,
             ContainerToResourceMetadata container2ResourceMd,
             ListOptionsToListBlobsOptions blobStore2AzureContainerListOptions,
             ListBlobsResponseToResourceList azure2BlobStoreResourceList, AzureBlobToBlob azureBlob2Blob,
             BlobToAzureBlob blob2AzureBlob, BlobPropertiesToBlobMetadata blob2BlobMd,
-            BlobToHttpGetOptions blob2ObjectGetOptions, Provider<MultipartUploadStrategy> multipartUploadStrategy) {
-      super(context, blobUtils, defaultLocation, locations);
+            BlobToHttpGetOptions blob2ObjectGetOptions) {
+      super(context, blobUtils, defaultLocation, locations, slicer);
       this.sync = checkNotNull(sync, "sync");
       this.container2ResourceMd = checkNotNull(container2ResourceMd, "container2ResourceMd");
       this.blobStore2AzureContainerListOptions = checkNotNull(blobStore2AzureContainerListOptions,
@@ -110,7 +111,6 @@ public class AzureBlobStore extends BaseBlobStore {
       this.blob2AzureBlob = checkNotNull(blob2AzureBlob, "blob2AzureBlob");
       this.blob2BlobMd = checkNotNull(blob2BlobMd, "blob2BlobMd");
       this.blob2ObjectGetOptions = checkNotNull(blob2ObjectGetOptions, "blob2ObjectGetOptions");
-      this.multipartUploadStrategy = checkNotNull(multipartUploadStrategy, "multipartUploadStrategy");
    }
 
    /**
@@ -226,8 +226,11 @@ public class AzureBlobStore extends BaseBlobStore {
     */
    @Override
    public String putBlob(String container, Blob blob, PutOptions options) {
+      if (options.getBlobAccess() != BlobAccess.PRIVATE) {
+         throw new UnsupportedOperationException("blob access not supported by Azure");
+      }
       if (options.isMultipart()) {
-         return multipartUploadStrategy.get().execute(container, blob);
+         return putMultipartBlob(container, blob, options);
       }
       return putBlob(container, blob);
    }
@@ -237,39 +240,57 @@ public class AzureBlobStore extends BaseBlobStore {
          CopyOptions options) {
       CopyBlobOptions.Builder azureOptions = CopyBlobOptions.builder();
 
-      Optional<Map<String, String>> userMetadata = options.getUserMetadata();
-      if (userMetadata.isPresent()) {
-         azureOptions.overrideUserMetadata(userMetadata.get());
+      if (options.ifMatch() != null) {
+         azureOptions.ifMatch(options.ifMatch());
+      }
+      if (options.ifNoneMatch() != null) {
+         azureOptions.ifNoneMatch(options.ifNoneMatch());
+      }
+      if (options.ifModifiedSince() != null) {
+         azureOptions.ifModifiedSince(options.ifModifiedSince());
+      }
+      if (options.ifUnmodifiedSince() != null) {
+         azureOptions.ifUnmodifiedSince(options.ifUnmodifiedSince());
+      }
+
+      Map<String, String> userMetadata = options.userMetadata();
+      if (userMetadata != null) {
+         azureOptions.overrideUserMetadata(userMetadata);
       }
 
       URI source = context.getSigner().signGetBlob(fromContainer, fromName).getEndpoint();
-      sync.copyBlob(source, toContainer, toName, azureOptions.build());
+      String eTag = sync.copyBlob(source, toContainer, toName, azureOptions.build());
 
-      ContentMetadataBuilder builder = ContentMetadataBuilder.create();
+      ContentMetadata contentMetadata = options.contentMetadata();
+      if (contentMetadata != null) {
+         ContentMetadataBuilder builder = ContentMetadataBuilder.create();
 
-      String eTag = null;
+         String cacheControl = contentMetadata.getCacheControl();
+         if (cacheControl != null) {
+            builder.cacheControl(cacheControl);
+         }
 
-      Optional<ContentMetadata> contentMetadata = options.getContentMetadata();
-      if (contentMetadata.isPresent()) {
-         String contentDisposition = contentMetadata.get().getContentDisposition();
+         String contentDisposition = contentMetadata.getContentDisposition();
          if (contentDisposition != null) {
             builder.contentDisposition(contentDisposition);
          }
 
-         String contentType = contentMetadata.get().getContentType();
+         String contentEncoding = contentMetadata.getContentEncoding();
+         if (contentEncoding != null) {
+            builder.contentEncoding(contentEncoding);
+         }
+
+         String contentLanguage = contentMetadata.getContentLanguage();
+         if (contentLanguage != null) {
+            builder.contentLanguage(contentLanguage);
+         }
+
+         String contentType = contentMetadata.getContentType();
          if (contentType != null) {
             builder.contentType(contentType);
          }
 
          eTag = sync.setBlobProperties(toContainer, toName, builder.build());
-      }
-
-      if (userMetadata.isPresent()) {
-         eTag = sync.setBlobMetadata(toContainer, toName, userMetadata.get());
-      }
-
-      if (eTag == null) {
-         eTag = sync.getBlobProperties(toContainer, toName).getETag();
       }
 
       return eTag;
@@ -348,7 +369,7 @@ public class AzureBlobStore extends BaseBlobStore {
    @Override
    public ContainerAccess getContainerAccess(String container) {
       PublicAccess access = sync.getPublicAccessForContainer(container);
-      if (access == PublicAccess.BLOB) {
+      if (access == PublicAccess.CONTAINER) {
          return ContainerAccess.PUBLIC_READ;
       } else {
          return ContainerAccess.PRIVATE;
@@ -359,7 +380,7 @@ public class AzureBlobStore extends BaseBlobStore {
    public void setContainerAccess(String container, ContainerAccess access) {
       PublicAccess publicAccess;
       if (access == ContainerAccess.PUBLIC_READ) {
-         publicAccess = PublicAccess.BLOB;
+         publicAccess = PublicAccess.CONTAINER;
       } else {
          publicAccess = PublicAccess.PRIVATE;
       }
@@ -368,7 +389,7 @@ public class AzureBlobStore extends BaseBlobStore {
 
    @Override
    public BlobAccess getBlobAccess(String container, String key) {
-      throw new UnsupportedOperationException("unsupported in Azure");
+      return BlobAccess.PRIVATE;
    }
 
    @Override
@@ -377,14 +398,15 @@ public class AzureBlobStore extends BaseBlobStore {
    }
 
    @Override
-   public MultipartUpload initiateMultipartUpload(String container, BlobMetadata blobMetadata) {
+   public MultipartUpload initiateMultipartUpload(String container, BlobMetadata blobMetadata, PutOptions options) {
       String uploadId = UUID.randomUUID().toString();
-      return MultipartUpload.create(container, blobMetadata.getName(), uploadId, blobMetadata);
+      return MultipartUpload.create(container, blobMetadata.getName(), uploadId, blobMetadata, options);
    }
 
    @Override
    public void abortMultipartUpload(MultipartUpload mpu) {
-      sync.deleteBlob(mpu.containerName(), mpu.blobName());
+      // Azure automatically removes uncommitted blocks after 7 days:
+      // http://gauravmantri.com/2012/05/11/comparing-windows-azure-blob-storage-and-amazon-simple-storage-service-s3part-ii/#f020
    }
 
    @Override
@@ -433,6 +455,33 @@ public class AzureBlobStore extends BaseBlobStore {
          parts.add(MultipartPart.create(partNumber, partSize, eTag));
       }
       return parts.build();
+   }
+
+   @Override
+   public List<MultipartUpload> listMultipartUploads(String container) {
+      ImmutableList.Builder<MultipartUpload> builder = ImmutableList.builder();
+      String marker = null;
+      while (true) {
+         ListBlobsOptions options = new ListBlobsOptions().include(EnumSet.of(ListBlobsInclude.UNCOMMITTEDBLOBS));
+         if (marker != null) {
+            options.marker(marker);
+         }
+         ListBlobsResponse response = sync.listBlobs(container, options);
+         for (BlobProperties properties : response) {
+            // only uncommitted blobs lack ETags
+            if (properties.getETag() != null) {
+               continue;
+            }
+            // TODO: bogus uploadId
+            String uploadId = UUID.randomUUID().toString();
+            builder.add(MultipartUpload.create(properties.getContainer(), properties.getName(), uploadId, null, null));
+         }
+         marker = response.getNextMarker();
+         if (marker == null) {
+            break;
+         }
+      }
+      return builder.build();
    }
 
    @Override

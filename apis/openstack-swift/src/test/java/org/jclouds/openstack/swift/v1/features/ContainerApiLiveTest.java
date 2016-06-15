@@ -36,6 +36,7 @@ import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.Test;
 
+import com.google.common.base.Predicate;
 import com.google.common.collect.FluentIterable;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableMultimap;
@@ -98,8 +99,12 @@ public class ContainerApiLiveTest extends BaseSwiftApiLiveTest<SwiftApi> {
       String lexicographicallyBeforeName = name.substring(0, name.length() - 1);
       for (String regionId : regions) {
          ListContainerOptions options = ListContainerOptions.Builder.marker(lexicographicallyBeforeName);
-         Container container = api.getContainerApi(regionId).list(options).get(0);
-         assertEquals(container.getName(), name);
+         Container container = api.getContainerApi(regionId).list(options).firstMatch(new Predicate<Container>() {
+            @Override
+            public boolean apply(Container container) {
+               return container.getName().equals(name);
+            }
+         }).get();
          assertTrue(container.getObjectCount() == 0);
          assertTrue(container.getBytesUsed() == 0);
       }
@@ -119,7 +124,7 @@ public class ContainerApiLiveTest extends BaseSwiftApiLiveTest<SwiftApi> {
          assertEquals(container.getName(), name);
          assertTrue(container.getMetadata().isEmpty());
 
-         assertNotNull(api.getContainerApi(regionId).update(name, opts));
+         api.getContainerApi(regionId).update(name, opts);
 
          Container updatedContainer = api.getContainerApi(regionId).get(name);
          assertNotNull(updatedContainer);
@@ -139,7 +144,7 @@ public class ContainerApiLiveTest extends BaseSwiftApiLiveTest<SwiftApi> {
 
          assertThat(containerApi.get(name).getAnybodyRead().get()).isFalse();
 
-         assertThat(containerApi.update(name, new UpdateContainerOptions().anybodyRead())).isTrue();
+         containerApi.update(name, new UpdateContainerOptions().anybodyRead());
          assertThat(containerApi.get(name).getAnybodyRead().get()).isTrue();
 
          assertThat(containerApi.deleteIfEmpty(name)).isTrue();
@@ -160,7 +165,7 @@ public class ContainerApiLiveTest extends BaseSwiftApiLiveTest<SwiftApi> {
 
       for (String regionId : regions) {
          ContainerApi containerApi = api.getContainerApi(regionId);
-         assertTrue(containerApi.updateMetadata(name, meta));
+         containerApi.updateMetadata(name, meta);
          containerHasMetadata(containerApi, name, meta);
       }
    }
@@ -171,7 +176,7 @@ public class ContainerApiLiveTest extends BaseSwiftApiLiveTest<SwiftApi> {
       for (String regionId : regions) {
          ContainerApi containerApi = api.getContainerApi(regionId);
          // update
-         assertTrue(containerApi.updateMetadata(name, meta));
+         containerApi.updateMetadata(name, meta);
          containerHasMetadata(containerApi, name, meta);
          // delete
          assertTrue(containerApi.deleteMetadata(name, meta));

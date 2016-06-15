@@ -36,6 +36,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.ws.rs.core.MediaType;
 
+import com.google.common.util.concurrent.Uninterruptibles;
 import org.jclouds.apis.BaseViewLiveTest;
 import org.jclouds.blobstore.BlobStoreContext;
 import org.jclouds.blobstore.attr.ConsistencyModel;
@@ -90,6 +91,9 @@ public class BaseBlobStoreIntegrationTest extends BaseViewLiveTest<BlobStoreCont
     * two test groups integration and live.
     */
    private static volatile BlockingQueue<String> containerNames = new ArrayBlockingQueue<String>(containerCount);
+
+   protected static final int AWAIT_CONSISTENCY_TIMEOUT_SECONDS = Integer.parseInt(System.getProperty(
+         "test.blobstore.await-consistency-timeout-seconds", "10"));
 
    /**
     * There are a lot of retries here mainly from experience running inside amazon EC2.
@@ -152,7 +156,7 @@ public class BaseBlobStoreIntegrationTest extends BaseViewLiveTest<BlobStoreCont
                      containerCount++;
                   } else {
                      try {
-                        createContainerAndEnsureEmpty(context, containerName);
+                        createContainerAndEnsureEmpty(context, containerName, false);
                         if (context.getBlobStore().containerExists(containerName))
                            containerNames.put(containerName);
                         else {
@@ -168,6 +172,7 @@ public class BaseBlobStoreIntegrationTest extends BaseViewLiveTest<BlobStoreCont
                      }
                   }
                }
+               awaitConsistency();
                testContext.setAttribute("containerNames", containerNames);
                System.err.printf("*** containers to test: %s%n", containerNames);
                // careful not to keep too many files open
@@ -248,16 +253,17 @@ public class BaseBlobStoreIntegrationTest extends BaseViewLiveTest<BlobStoreCont
       assertConsistencyAware(view, assertion);
    }
 
-   protected static void createContainerAndEnsureEmpty(BlobStoreContext context, final String containerName)
-         throws InterruptedException {
+   protected void createContainerAndEnsureEmpty(BlobStoreContext context, final String containerName,
+         boolean ensureConsistent) throws InterruptedException {
       context.getBlobStore().createContainerInLocation(null, containerName);
-      if (context.getConsistencyModel() == ConsistencyModel.EVENTUAL)
-         Thread.sleep(10000);
+      if (ensureConsistent) {
+         awaitConsistency();
+      }
       context.getBlobStore().clearContainer(containerName);
    }
 
    protected void createContainerAndEnsureEmpty(String containerName) throws InterruptedException {
-      createContainerAndEnsureEmpty(view, containerName);
+      createContainerAndEnsureEmpty(view, containerName, true);
    }
 
    protected String addBlobToContainer(String sourceContainer, String key) {
@@ -284,6 +290,7 @@ public class BaseBlobStoreIntegrationTest extends BaseViewLiveTest<BlobStoreCont
    protected <T extends BlobMetadata> T validateMetadata(T md, String container, String name) {
       assertEquals(md.getName(), name);
       assertEquals(md.getContainer(), container);
+      assertEquals(md.getSize(), md.getContentMetadata().getContentLength());
       return md;
    }
 
@@ -526,4 +533,9 @@ public class BaseBlobStoreIntegrationTest extends BaseViewLiveTest<BlobStoreCont
       return typeToken(BlobStoreContext.class);
    }
 
+   protected void awaitConsistency() {
+      if (view.getConsistencyModel() == ConsistencyModel.EVENTUAL) {
+         Uninterruptibles.sleepUninterruptibly(AWAIT_CONSISTENCY_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+      }
+   }
 }

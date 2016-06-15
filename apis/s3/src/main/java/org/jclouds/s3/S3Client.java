@@ -18,7 +18,6 @@ package org.jclouds.s3;
 
 import static com.google.common.net.HttpHeaders.EXPECT;
 import static org.jclouds.blobstore.attr.BlobScopes.CONTAINER;
-import static org.jclouds.s3.S3Fallbacks.TrueOn404OrNotFoundFalseOnIllegalState;
 
 import java.io.Closeable;
 import java.util.Map;
@@ -59,9 +58,11 @@ import org.jclouds.rest.annotations.RequestFilters;
 import org.jclouds.rest.annotations.ResponseParser;
 import org.jclouds.rest.annotations.VirtualHost;
 import org.jclouds.rest.annotations.XMLResponseParser;
+import org.jclouds.s3.S3Fallbacks.TrueOn404OrNotFoundFalseOnIllegalState;
 import org.jclouds.s3.binders.BindACLToXMLPayload;
 import org.jclouds.s3.binders.BindAsHostPrefixIfConfigured;
 import org.jclouds.s3.binders.BindBucketLoggingToXmlPayload;
+import org.jclouds.s3.binders.BindCannedAclToRequest;
 import org.jclouds.s3.binders.BindIterableAsPayloadToDeleteRequest;
 import org.jclouds.s3.binders.BindNoBucketLoggingToXmlPayload;
 import org.jclouds.s3.binders.BindObjectMetadataToRequest;
@@ -71,8 +72,10 @@ import org.jclouds.s3.binders.BindS3ObjectMetadataToRequest;
 import org.jclouds.s3.domain.AccessControlList;
 import org.jclouds.s3.domain.BucketLogging;
 import org.jclouds.s3.domain.BucketMetadata;
+import org.jclouds.s3.domain.CannedAccessPolicy;
 import org.jclouds.s3.domain.DeleteResult;
 import org.jclouds.s3.domain.ListBucketResponse;
+import org.jclouds.s3.domain.ListMultipartUploadsResponse;
 import org.jclouds.s3.domain.ObjectMetadata;
 import org.jclouds.s3.domain.Payer;
 import org.jclouds.s3.domain.S3Object;
@@ -98,6 +101,7 @@ import org.jclouds.s3.xml.CopyObjectHandler;
 import org.jclouds.s3.xml.DeleteResultHandler;
 import org.jclouds.s3.xml.ListAllMyBucketsHandler;
 import org.jclouds.s3.xml.ListBucketHandler;
+import org.jclouds.s3.xml.ListMultipartUploadsHandler;
 import org.jclouds.s3.xml.LocationConstraintHandler;
 import org.jclouds.s3.xml.PartIdsFromHttpResponse;
 import org.jclouds.s3.xml.PayerHandler;
@@ -427,6 +431,28 @@ public interface S3Client extends Closeable {
          @BinderParam(BindACLToXMLPayload.class) AccessControlList acl);
 
    /**
+    * Update a bucket's Access Control List settings.
+    * <p/>
+    * A PUT request operation directed at a bucket URI with the "acl" parameter sets the Access
+    * Control List (ACL) settings for that S3 item.
+    * <p />
+    * To set a bucket or object's ACL, you must have WRITE_ACP or FULL_CONTROL access to the item.
+    *
+    * @param bucketName
+    *           the bucket whose Access Control List settings will be updated.
+    * @param acl
+    *           the ACL to apply to the bucket.
+    * @return true if the bucket's Access Control List was updated successfully.
+    */
+   @Named("UpdateBucketCannedAcl")
+   @PUT
+   @Path("/")
+   @QueryParams(keys = "acl")
+   boolean updateBucketCannedACL(@Bucket @EndpointParam(parser = AssignCorrectHostnameForBucket.class) @BinderParam(
+         BindAsHostPrefixIfConfigured.class) @ParamValidators(BucketNameValidator.class) String bucketName,
+         @BinderParam(BindCannedAclToRequest.class) CannedAccessPolicy acl);
+
+   /**
     * A GET request operation directed at an object or bucket URI with the "acl" parameter retrieves
     * the Access Control List (ACL) settings for that S3 item.
     * <p />
@@ -469,6 +495,29 @@ public interface S3Client extends Closeable {
          BindAsHostPrefixIfConfigured.class) @ParamValidators(BucketNameValidator.class) String bucketName,
          @PathParam("key") String key, @BinderParam(BindACLToXMLPayload.class) AccessControlList acl);
 
+   /**
+    * Update an object's Access Control List settings.
+    * <p/>
+    * A PUT request operation directed at an object URI with the "acl" parameter sets the Access
+    * Control List (ACL) settings for that S3 item.
+    * <p />
+    * To set a bucket or object's ACL, you must have WRITE_ACP or FULL_CONTROL access to the item.
+    *
+    * @param bucketName
+    *           the bucket containing the object to be updated
+    * @param key
+    *           the key of the object whose Access Control List settings will be updated.
+    * @param acl
+    *           the ACL to apply to the object.
+    * @return true if the object's Access Control List was updated successfully.
+    */
+   @Named("UpdateObjectCannedAcl")
+   @PUT
+   @QueryParams(keys = "acl")
+   @Path("/{key}")
+   boolean updateObjectCannedACL(@Bucket @EndpointParam(parser = AssignCorrectHostnameForBucket.class) @BinderParam(
+         BindAsHostPrefixIfConfigured.class) @ParamValidators(BucketNameValidator.class) String bucketName,
+         @PathParam("key") String key, @BinderParam(BindCannedAclToRequest.class) CannedAccessPolicy acl);
 
    /**
     * A GET location request operation using a bucket URI lists the location constraint of the
@@ -678,6 +727,18 @@ public interface S3Client extends Closeable {
          @PathParam("key") String key, @QueryParam("partNumber") int partNumber,
          @QueryParam("uploadId") String uploadId, Payload part);
 
+   @Named("UploadPartCopy")
+   @PUT
+   @Path("/{key}")
+   @Headers(keys = {"x-amz-copy-source", "x-amz-copy-source-range"}, values = {"/{sourceBucket}/{sourceObject}", "bytes={startOffset}-{endOffset}"})
+   @ResponseParser(ETagFromHttpResponseViaRegex.class)
+   String uploadPartCopy(@Bucket @EndpointParam(parser = AssignCorrectHostnameForBucket.class) @BinderParam(
+         BindAsHostPrefixIfConfigured.class) @ParamValidators(BucketNameValidator.class) String bucketName,
+         @PathParam("key") String key, @QueryParam("partNumber") int partNumber,
+         @QueryParam("uploadId") String uploadId,
+         @PathParam("sourceBucket") String sourceBucket, @PathParam("sourceObject") String sourceObject,
+         @PathParam("startOffset") long startOffset, @PathParam("endOffset") long endOffset);
+
    /**
     *
     This operation completes a multipart upload by assembling previously uploaded parts.
@@ -726,4 +787,15 @@ public interface S3Client extends Closeable {
    Map<Integer, String> listMultipartParts(@Bucket @EndpointParam(parser = AssignCorrectHostnameForBucket.class)
          @BinderParam(BindAsHostPrefixIfConfigured.class) @ParamValidators(BucketNameValidator.class) String bucketName,
          @PathParam("key") String key, @QueryParam("uploadId") String uploadId);
+
+   @Named("ListMultipartUploads")
+   @GET
+   @Path("/")
+   @QueryParams(keys = "uploads")
+   @XMLResponseParser(ListMultipartUploadsHandler.class)
+   ListMultipartUploadsResponse listMultipartUploads(@Bucket @EndpointParam(parser = AssignCorrectHostnameForBucket.class)
+         @BinderParam(BindAsHostPrefixIfConfigured.class) @ParamValidators(BucketNameValidator.class) String bucketName,
+         @QueryParam("delimiter") @Nullable String delimiter, @QueryParam("max-uploads") @Nullable Integer maxUploads,
+         @QueryParam("key-marker") @Nullable String keyMarker, @QueryParam("prefix") @Nullable String prefix,
+         @QueryParam("upload-id-marker") @Nullable String uploadIdMarker);
 }

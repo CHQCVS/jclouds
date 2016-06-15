@@ -17,6 +17,7 @@
 package org.jclouds.openstack.swift.v1.features;
 
 import static java.lang.String.format;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.jclouds.io.Payloads.newByteSourcePayload;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertNotNull;
@@ -26,6 +27,7 @@ import java.util.List;
 import java.util.UUID;
 
 import org.jclouds.openstack.swift.v1.SwiftApi;
+import org.jclouds.openstack.swift.v1.domain.DeleteStaticLargeObjectResponse;
 import org.jclouds.openstack.swift.v1.domain.Segment;
 import org.jclouds.openstack.swift.v1.domain.SwiftObject;
 import org.jclouds.openstack.swift.v1.internal.BaseSwiftApiLiveTest;
@@ -47,7 +49,11 @@ public class StaticLargeObjectApiLiveTest extends BaseSwiftApiLiveTest<SwiftApi>
 
    public void testNotPresentWhenDeleting() throws Exception {
       for (String regionId : regions) {
-         api.getStaticLargeObjectApi(regionId, containerName).delete(UUID.randomUUID().toString());
+         DeleteStaticLargeObjectResponse resp = api.getStaticLargeObjectApi(regionId, containerName).delete(UUID.randomUUID().toString());
+         assertThat(resp.status()).isEqualTo("200 OK");
+         assertThat(resp.deleted()).isZero();
+         assertThat(resp.notFound()).isEqualTo(1);
+         assertThat(resp.errors()).isEmpty();
       }
    }
 
@@ -56,9 +62,11 @@ public class StaticLargeObjectApiLiveTest extends BaseSwiftApiLiveTest<SwiftApi>
          ObjectApi objectApi = api.getObjectApi(regionId, containerName);
 
          String etag1s = objectApi.put(name + "/1", newByteSourcePayload(ByteSource.wrap(megOf1s)));
+         awaitConsistency();
          assertMegabyteAndETagMatches(regionId, name + "/1", etag1s);
 
          String etag2s = objectApi.put(name + "/2", newByteSourcePayload(ByteSource.wrap(megOf2s)));
+         awaitConsistency();
          assertMegabyteAndETagMatches(regionId, name + "/2", etag2s);
 
          List<Segment> segments = ImmutableList.<Segment> builder()
@@ -70,10 +78,13 @@ public class StaticLargeObjectApiLiveTest extends BaseSwiftApiLiveTest<SwiftApi>
                      .build())
                      .build();
 
+         awaitConsistency();
          String etagOfEtags = api.getStaticLargeObjectApi(regionId, containerName).replaceManifest(
                name, segments, ImmutableMap.of("myfoo", "Bar"));
 
          assertNotNull(etagOfEtags);
+
+         awaitConsistency();
 
          SwiftObject bigObject = api.getObjectApi(regionId, containerName).get(name);
          assertEquals(bigObject.getETag(), etagOfEtags);
@@ -81,15 +92,31 @@ public class StaticLargeObjectApiLiveTest extends BaseSwiftApiLiveTest<SwiftApi>
          assertEquals(bigObject.getMetadata(), ImmutableMap.of("myfoo", "Bar"));
 
          // segments are visible
-         assertEquals(api.getContainerApi(regionId).get(containerName).getObjectCount(), 3);
+         assertEquals(api.getContainerApi(regionId).get(containerName).getObjectCount(), Long.valueOf(3));
       }
    }
 
    @Test(dependsOnMethods = "testReplaceManifest")
    public void testDelete() throws Exception {
       for (String regionId : regions) {
-         api.getStaticLargeObjectApi(regionId, containerName).delete(name);
-         assertEquals(api.getContainerApi(regionId).get(containerName).getObjectCount(), 0);
+         DeleteStaticLargeObjectResponse resp = api.getStaticLargeObjectApi(regionId, containerName).delete(name);
+         assertThat(resp.status()).isEqualTo("200 OK");
+         assertThat(resp.deleted()).isEqualTo(3);
+         assertThat(resp.notFound()).isZero();
+         assertThat(resp.errors()).isEmpty();
+         assertEquals(api.getContainerApi(regionId).get(containerName).getObjectCount(), Long.valueOf(0));
+      }
+   }
+
+   public void testDeleteSinglePartObjectWithMultiPartDelete() throws Exception {
+      String objectName = "testDeleteSinglePartObjectWithMultiPartDelete";
+      for (String regionId : regions) {
+         api.getObjectApi(regionId, containerName).put(objectName, newByteSourcePayload(ByteSource.wrap("swifty".getBytes())));
+         DeleteStaticLargeObjectResponse resp = api.getStaticLargeObjectApi(regionId, containerName).delete(objectName);
+         assertThat(resp.status()).isEqualTo("400 Bad Request");
+         assertThat(resp.deleted()).isZero();
+         assertThat(resp.notFound()).isZero();
+         assertThat(resp.errors()).hasSize(1);
       }
    }
 

@@ -66,6 +66,7 @@ import org.jclouds.compute.domain.Template;
 import org.jclouds.compute.domain.TemplateBuilder;
 import org.jclouds.compute.extensions.ImageExtension;
 import org.jclouds.compute.extensions.SecurityGroupExtension;
+import org.jclouds.compute.extensions.internal.DelegatingImageExtension;
 import org.jclouds.compute.options.RunScriptOptions;
 import org.jclouds.compute.options.TemplateOptions;
 import org.jclouds.compute.reference.ComputeServiceConstants;
@@ -80,6 +81,7 @@ import org.jclouds.compute.strategy.RebootNodeStrategy;
 import org.jclouds.compute.strategy.ResumeNodeStrategy;
 import org.jclouds.compute.strategy.RunScriptOnNodeAndAddToGoodMapOrPutExceptionIntoBadMap;
 import org.jclouds.compute.strategy.SuspendNodeStrategy;
+import org.jclouds.compute.suppliers.ImageCacheSupplier;
 import org.jclouds.domain.Credentials;
 import org.jclouds.domain.Location;
 import org.jclouds.domain.LoginCredentials;
@@ -180,8 +182,13 @@ public class BaseComputeService implements ComputeService {
       this.runScriptOnNodeFactory = checkNotNull(runScriptOnNodeFactory, "runScriptOnNodeFactory");
       this.persistNodeCredentials = checkNotNull(persistNodeCredentials, "persistNodeCredentials");
       this.userExecutor = checkNotNull(userExecutor, "userExecutor");
-      this.imageExtension = checkNotNull(imageExtension, "imageExtension");
       this.securityGroupExtension = checkNotNull(securityGroupExtension, "securityGroupExtension");
+      if (imageExtension.isPresent() && images instanceof ImageCacheSupplier) {
+         this.imageExtension = Optional.<ImageExtension> of(new DelegatingImageExtension(ImageCacheSupplier.class
+               .cast(images), imageExtension.get()));
+      } else {
+         this.imageExtension = checkNotNull(imageExtension, "imageExtension");
+      }
    }
 
    /**
@@ -330,9 +337,9 @@ public class BaseComputeService implements ComputeService {
     * {@inheritDoc}
     */
    @Override
-   public Set<ComputeMetadata> listNodes() {
+   public Set<? extends ComputeMetadata> listNodes() {
       logger.trace(">> listing nodes");
-      Set<ComputeMetadata> set = newLinkedHashSet(listNodesStrategy.listNodes());
+      Set<? extends ComputeMetadata> set = newLinkedHashSet(listNodesStrategy.listNodes());
       logger.trace("<< list(%d)", set.size());
       return set;
    }
@@ -344,7 +351,7 @@ public class BaseComputeService implements ComputeService {
    public Set<? extends NodeMetadata> listNodesByIds(Iterable<String> ids) {
       checkNotNull(ids, "ids");
       logger.trace(">> listing node with ids(%s)", ids);
-      Set<NodeMetadata> set = ImmutableSet.copyOf(listNodesStrategy.listNodesByIds(ids));
+      Set<? extends NodeMetadata> set = ImmutableSet.copyOf(listNodesStrategy.listNodesByIds(ids));
       logger.trace("<< list(%d)", set.size());
       return set;
    }
@@ -356,7 +363,7 @@ public class BaseComputeService implements ComputeService {
    public Set<? extends NodeMetadata> listNodesDetailsMatching(Predicate<ComputeMetadata> filter) {
       checkNotNull(filter, "filter");
       logger.trace(">> listing node details matching(%s)", filter);
-      Set<NodeMetadata> set = newLinkedHashSet(listNodesStrategy.listDetailsOnNodesMatching(filter));
+      Set<? extends NodeMetadata> set = newLinkedHashSet(listNodesStrategy.listDetailsOnNodesMatching(filter));
       logger.trace("<< list(%d)", set.size());
       return set;
    }

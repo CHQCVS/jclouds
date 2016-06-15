@@ -19,6 +19,7 @@ package org.jclouds.openstack.swift.v1.features;
 import static com.google.common.net.HttpHeaders.EXPECT;
 import static javax.ws.rs.core.MediaType.APPLICATION_JSON;
 import static org.jclouds.openstack.swift.v1.reference.SwiftHeaders.OBJECT_COPY_FROM;
+import static org.jclouds.openstack.swift.v1.reference.SwiftHeaders.OBJECT_COPY_FRESH_METADATA;
 
 import java.util.Map;
 
@@ -36,25 +37,27 @@ import javax.ws.rs.Produces;
 import org.jclouds.Fallbacks.FalseOnNotFoundOr404;
 import org.jclouds.Fallbacks.NullOnNotFoundOr404;
 import org.jclouds.Fallbacks.VoidOnNotFoundOr404;
-import org.jclouds.blobstore.BlobStoreFallbacks.FalseOnContainerNotFound;
+import org.jclouds.blobstore.KeyNotFoundException;
 import org.jclouds.http.options.GetOptions;
 import org.jclouds.io.Payload;
 import org.jclouds.javax.annotation.Nullable;
 import org.jclouds.openstack.keystone.v2_0.filters.AuthenticateRequest;
 import org.jclouds.openstack.swift.v1.binders.BindMetadataToHeaders.BindObjectMetadataToHeaders;
-import org.jclouds.openstack.swift.v1.binders.BindMetadataToHeaders.BindRawMetadataToHeaders;
 import org.jclouds.openstack.swift.v1.binders.BindMetadataToHeaders.BindRemoveObjectMetadataToHeaders;
+import org.jclouds.openstack.swift.v1.binders.BindToHeaders;
 import org.jclouds.openstack.swift.v1.binders.SetPayload;
 import org.jclouds.openstack.swift.v1.domain.ObjectList;
 import org.jclouds.openstack.swift.v1.domain.SwiftObject;
 import org.jclouds.openstack.swift.v1.functions.ETagHeader;
 import org.jclouds.openstack.swift.v1.functions.ParseObjectFromResponse;
 import org.jclouds.openstack.swift.v1.functions.ParseObjectListFromResponse;
+import org.jclouds.openstack.swift.v1.options.CopyOptions;
 import org.jclouds.openstack.swift.v1.options.ListContainerOptions;
 import org.jclouds.openstack.swift.v1.options.PutOptions;
 import org.jclouds.rest.annotations.BinderParam;
 import org.jclouds.rest.annotations.Fallback;
 import org.jclouds.rest.annotations.Headers;
+import org.jclouds.rest.annotations.QueryParams;
 import org.jclouds.rest.annotations.RequestFilters;
 import org.jclouds.rest.annotations.ResponseParser;
 
@@ -81,6 +84,7 @@ public interface ObjectApi {
    @GET
    @ResponseParser(ParseObjectListFromResponse.class)
    @Fallback(NullOnNotFoundOr404.class)
+   @QueryParams(keys = "format", values = "json")
    @Nullable
    ObjectList list();
 
@@ -98,6 +102,7 @@ public interface ObjectApi {
    @GET
    @ResponseParser(ParseObjectListFromResponse.class)
    @Fallback(NullOnNotFoundOr404.class)
+   @QueryParams(keys = "format", values = "json")
    @Nullable
    ObjectList list(ListContainerOptions options);
 
@@ -167,6 +172,7 @@ public interface ObjectApi {
    @Path("/{objectName}")
    @ResponseParser(ParseObjectFromResponse.class)
    @Fallback(NullOnNotFoundOr404.class)
+   @QueryParams(keys = "format", values = "json")
    @Nullable
    SwiftObject get(@PathParam("objectName") String objectName);
 
@@ -185,6 +191,7 @@ public interface ObjectApi {
    @Path("/{objectName}")
    @ResponseParser(ParseObjectFromResponse.class)
    @Fallback(NullOnNotFoundOr404.class)
+   @QueryParams(keys = "format", values = "json")
    @Nullable
    SwiftObject get(@PathParam("objectName") String objectName, GetOptions options);
 
@@ -195,16 +202,12 @@ public interface ObjectApi {
     *           corresponds to {@link SwiftObject#getName()}.
     * @param metadata
     *           the metadata to create or update.
-    *
-    * @return {@code true} if the metadata was successfully created or updated,
-    *         {@code false} if not.
     */
    @Named("object:updateMetadata")
    @POST
    @Path("/{objectName}")
    @Produces("")
-   @Fallback(FalseOnNotFoundOr404.class)
-   boolean updateMetadata(@PathParam("objectName") String objectName,
+   void updateMetadata(@PathParam("objectName") String objectName,
          @BinderParam(BindObjectMetadataToHeaders.class) Map<String, String> metadata);
 
    /**
@@ -216,16 +219,13 @@ public interface ObjectApi {
     * @param metadata
     *           the metadata to create or update.
     *
-    * @return {@code true} if the metadata was successfully created or updated,
-    *         {@code false} if not.
     */
    @Named("object:updateMetadata")
    @POST
    @Path("/{objectName}")
    @Produces("")
-   @Fallback(FalseOnNotFoundOr404.class)
-   boolean updateRawMetadata(@PathParam("objectName") String objectName,
-         @BinderParam(BindRawMetadataToHeaders.class) Map<String, String> metadata);
+   void updateHeaders(@PathParam("objectName") String objectName,
+         @BinderParam(BindToHeaders.class) Map<String, String> metadata);
 
    /**
     * Deletes the metadata from a {@link SwiftObject}.
@@ -270,16 +270,15 @@ public interface ObjectApi {
     * @param sourceObject
     *           the source object name.
     *
-    * @return {@code true} if the object was successfully copied, {@code false} if not.
-    *
-    * @throws org.jclouds.openstack.swift.v1.CopyObjectException if the source or destination container do not exist.
+    * @deprecated call copy(String, String, String, CopyOptions) instead
+    * @throws KeyNotFoundException if the source or destination container do not exist.
     */
+   @Deprecated
    @Named("object:copy")
    @PUT
    @Path("/{destinationObject}")
    @Headers(keys = OBJECT_COPY_FROM, values = "/{sourceContainer}/{sourceObject}")
-   @Fallback(FalseOnContainerNotFound.class)
-   boolean copy(@PathParam("destinationObject") String destinationObject,
+   void copy(@PathParam("destinationObject") String destinationObject,
                 @PathParam("sourceContainer") String sourceContainer,
                 @PathParam("sourceObject") String sourceObject);
 
@@ -295,24 +294,143 @@ public interface ObjectApi {
     *           the source container name.
     * @param sourceObject
     *           the source object name.
-    * @param userMetadata
-    *           Freeform metadata for the object, automatically prefixed/escaped
-    * @param objectMetadata
-    *           Unprefixed/unescaped metadata, such as Content-Disposition
+    * @param options
+    *           conditional copy
     *
-    * @return {@code true} if the object was successfully copied, {@code false} if not.
-    *
-    * @throws org.jclouds.openstack.swift.v1.CopyObjectException if the source or destination container do not exist.
+    * @throws KeyNotFoundException if the source or destination container do not exist.
     */
    @Named("object:copy")
    @PUT
    @Path("/{destinationObject}")
    @Headers(keys = OBJECT_COPY_FROM, values = "/{sourceContainer}/{sourceObject}")
-   @Fallback(FalseOnContainerNotFound.class)
-   boolean copy(@PathParam("destinationObject") String destinationObject,
+   void copy(@PathParam("destinationObject") String destinationObject,
+                @PathParam("sourceContainer") String sourceContainer,
+                @PathParam("sourceObject") String sourceObject,
+                CopyOptions options);
+
+   /**
+    * Copies an object from one container to another, replacing metadata.
+    *
+    * <h3>NOTE</h3>
+    * This is a server side copy.
+    *
+    * @param destinationObject
+    *           the destination object name.
+    * @param sourceContainer
+    *           the source container name.
+    * @param sourceObject
+    *           the source object name.
+    * @param userMetadata
+    *           Freeform metadata for the object, automatically prefixed/escaped
+    * @param objectMetadata
+    *           Unprefixed/unescaped metadata, such as Content-Disposition
+    *
+    * @deprecated call copy(String, String, String, Map, Map, CopyOptions) instead
+    * @throws KeyNotFoundException if the source or destination container do not exist.
+    */
+   @Deprecated
+   @Named("object:copy")
+   @PUT
+   @Path("/{destinationObject}")
+   @Headers(keys = {OBJECT_COPY_FROM, OBJECT_COPY_FRESH_METADATA}, values = {"/{sourceContainer}/{sourceObject}", "True"})
+   void copy(@PathParam("destinationObject") String destinationObject,
          @PathParam("sourceContainer") String sourceContainer,
          @PathParam("sourceObject") String sourceObject,
          @BinderParam(BindObjectMetadataToHeaders.class) Map<String, String> userMetadata,
-         @BinderParam(BindRawMetadataToHeaders.class) Map<String, String> objectMetadata);
+         @BinderParam(BindToHeaders.class) Map<String, String> objectMetadata);
 
+   /**
+    * Copies an object from one container to another, replacing metadata.
+    *
+    * <h3>NOTE</h3>
+    * This is a server side copy.
+    *
+    * @param destinationObject
+    *           the destination object name.
+    * @param sourceContainer
+    *           the source container name.
+    * @param sourceObject
+    *           the source object name.
+    * @param userMetadata
+    *           Freeform metadata for the object, automatically prefixed/escaped
+    * @param objectMetadata
+    *           Unprefixed/unescaped metadata, such as Content-Disposition
+    * @param options
+    *           conditional copy
+    *
+    * @throws KeyNotFoundException if the source or destination container do not exist.
+    */
+   @Named("object:copy")
+   @PUT
+   @Path("/{destinationObject}")
+   @Headers(keys = {OBJECT_COPY_FROM, OBJECT_COPY_FRESH_METADATA}, values = {"/{sourceContainer}/{sourceObject}", "True"})
+   void copy(@PathParam("destinationObject") String destinationObject,
+         @PathParam("sourceContainer") String sourceContainer,
+         @PathParam("sourceObject") String sourceObject,
+         @BinderParam(BindObjectMetadataToHeaders.class) Map<String, String> userMetadata,
+         @BinderParam(BindToHeaders.class) Map<String, String> objectMetadata,
+         CopyOptions options);
+
+   /**
+    * Copies an object from one container to another, appending metadata.
+    *
+    * <h3>NOTE</h3>
+    * This is a server side copy.
+    *
+    * @param destinationObject
+    *           the destination object name.
+    * @param sourceContainer
+    *           the source container name.
+    * @param sourceObject
+    *           the source object name.
+    * @param userMetadata
+    *           Freeform metadata for the object, automatically prefixed/escaped
+    * @param objectMetadata
+    *           Unprefixed/unescaped metadata, such as Content-Disposition
+    *
+    * @deprecated call copyAppendMetadata(String, String, String, Map, Map, CopyOptions) instead
+    * @throws KeyNotFoundException if the source or destination container do not exist.
+    */
+   @Deprecated
+   @Named("object:copy")
+   @PUT
+   @Path("/{destinationObject}")
+   @Headers(keys = OBJECT_COPY_FROM, values = "/{sourceContainer}/{sourceObject}")
+   void copyAppendMetadata(@PathParam("destinationObject") String destinationObject,
+         @PathParam("sourceContainer") String sourceContainer,
+         @PathParam("sourceObject") String sourceObject,
+         @BinderParam(BindObjectMetadataToHeaders.class) Map<String, String> userMetadata,
+         @BinderParam(BindToHeaders.class) Map<String, String> objectMetadata);
+
+   /**
+    * Copies an object from one container to another, appending metadata.
+    *
+    * <h3>NOTE</h3>
+    * This is a server side copy.
+    *
+    * @param destinationObject
+    *           the destination object name.
+    * @param sourceContainer
+    *           the source container name.
+    * @param sourceObject
+    *           the source object name.
+    * @param userMetadata
+    *           Freeform metadata for the object, automatically prefixed/escaped
+    * @param objectMetadata
+    *           Unprefixed/unescaped metadata, such as Content-Disposition
+    * @param options
+    *           conditional copy
+    *
+    * @throws KeyNotFoundException if the source or destination container do not exist.
+    */
+   @Named("object:copy")
+   @PUT
+   @Path("/{destinationObject}")
+   @Headers(keys = OBJECT_COPY_FROM, values = "/{sourceContainer}/{sourceObject}")
+   void copyAppendMetadata(@PathParam("destinationObject") String destinationObject,
+         @PathParam("sourceContainer") String sourceContainer,
+         @PathParam("sourceObject") String sourceObject,
+         @BinderParam(BindObjectMetadataToHeaders.class) Map<String, String> userMetadata,
+         @BinderParam(BindToHeaders.class) Map<String, String> objectMetadata,
+         CopyOptions options);
 }

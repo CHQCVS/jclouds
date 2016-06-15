@@ -842,7 +842,7 @@ public abstract class BaseComputeServiceLiveTest extends BaseComputeServiceConte
       for (Hardware hardware : computeService.listHardwareProfiles()) {
          assert hardware.getProviderId() != null : hardware;
          assert getCores(hardware) > 0 : hardware;
-         assert hardware.getVolumes().size() >= 0 : hardware;
+         assert hardware.getVolumes().size() > 0 : hardware;
          assert hardware.getRam() > 0 : hardware;
          assertEquals(hardware.getType(), ComputeType.HARDWARE);
       }
@@ -912,7 +912,7 @@ public abstract class BaseComputeServiceLiveTest extends BaseComputeServiceConte
             // Destroy all nodes in the group but also make sure to destroy other created nodes that might not be in it.
             // The "testCreateTwoNodesWithOneSpecifiedName" creates nodes with an explicit name that puts them outside the group,
             // so the list of nodes should also be taken into account when destroying the nodes.
-            computeService.destroyNodesMatching(Predicates.<NodeMetadata>or(inGroup(group), in(nodes)));
+            computeService.destroyNodesMatching(Predicates.<NodeMetadata> or(inGroup(group), in(nodes)));
          }
       } catch (Exception e) {
 

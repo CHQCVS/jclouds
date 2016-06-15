@@ -50,11 +50,6 @@
     </dependency>
     <dependency>
       <groupId>org.apache.jclouds.api</groupId>
-      <artifactId>swift</artifactId>
-      <version>${project.version}</version>
-    </dependency>
-    <dependency>
-      <groupId>org.apache.jclouds.api</groupId>
       <artifactId>openstack-swift</artifactId>
       <version>${project.version}</version>
     </dependency>
@@ -68,17 +63,12 @@
       <artifactId>rackspace-cloudfiles-uk</artifactId>
       <version>${project.version}</version>
     </dependency>
-    <dependency>
-      <groupId>org.apache.jclouds.provider</groupId>
-      <artifactId>hpcloud-objectstorage</artifactId>
-      <version>${project.version}</version>
-    </dependency>
   </dependencies>
   <profiles>
     <profile>
       <id>jre1.7</id>
       <activation>
-        <jdk>1.7</jdk>
+        <jdk>[1.7,)</jdk>
       </activation>
       <dependencies>
         <dependency>

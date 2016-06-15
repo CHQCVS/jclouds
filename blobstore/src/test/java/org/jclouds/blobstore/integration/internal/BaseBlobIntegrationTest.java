@@ -48,9 +48,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.ws.rs.core.MediaType;
 
+import org.assertj.core.api.Fail;
 import org.jclouds.blobstore.BlobStore;
 import org.jclouds.blobstore.ContainerNotFoundException;
-import org.jclouds.blobstore.attr.ConsistencyModel;
+import org.jclouds.blobstore.KeyNotFoundException;
 import org.jclouds.blobstore.domain.Blob;
 import org.jclouds.blobstore.domain.BlobAccess;
 import org.jclouds.blobstore.domain.BlobBuilder.PayloadBlobBuilder;
@@ -61,12 +62,16 @@ import org.jclouds.blobstore.domain.PageSet;
 import org.jclouds.blobstore.domain.StorageMetadata;
 import org.jclouds.blobstore.domain.StorageType;
 import org.jclouds.blobstore.options.CopyOptions;
+import org.jclouds.blobstore.options.GetOptions;
 import org.jclouds.blobstore.options.PutOptions;
+import org.jclouds.blobstore.strategy.internal.MultipartUploadSlicingAlgorithm;
 import org.jclouds.crypto.Crypto;
 import org.jclouds.encryption.internal.JCECrypto;
+import org.jclouds.http.HttpRequest;
+import org.jclouds.http.HttpResponse;
 import org.jclouds.http.HttpResponseException;
-import org.jclouds.io.ContentMetadataBuilder;
 import org.jclouds.io.ByteStreams2;
+import org.jclouds.io.ContentMetadataBuilder;
 import org.jclouds.io.Payload;
 import org.jclouds.io.Payloads;
 import org.jclouds.io.payloads.ByteSourcePayload;
@@ -89,11 +94,12 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Maps;
 import com.google.common.hash.HashCode;
-import com.google.common.io.ByteStreams;
+import com.google.common.hash.Hashing;
 import com.google.common.io.ByteSource;
+import com.google.common.io.ByteStreams;
 import com.google.common.io.Files;
+import com.google.common.net.HttpHeaders;
 import com.google.common.util.concurrent.ListenableFuture;
-import com.google.common.util.concurrent.Uninterruptibles;
 
 public class BaseBlobIntegrationTest extends BaseBlobStoreIntegrationTest {
    private static final ByteSource oneHundredOneConstitutions = TestUtils.randomByteSource().slice(0, 101 * 45118);
@@ -161,12 +167,11 @@ public class BaseBlobIntegrationTest extends BaseBlobStoreIntegrationTest {
    @Test(groups = { "integration", "live" })
    public void testFileGetParallel() throws Exception {
       final ByteSource supplier = createTestInput(32 * 1024);
-      final String expectedContentDisposition = "attachment; filename=constit.txt";
       final String container = getContainerName();
       try {
          final String name = "constitution.txt";
 
-         uploadByteSource(container, name, expectedContentDisposition, supplier);
+         uploadByteSource(container, name, supplier);
          Map<Integer, ListenableFuture<?>> responses = Maps.newHashMap();
          for (int i = 0; i < 10; i++) {
             responses.put(i, this.exec.submit(new Callable<Void>() {
@@ -175,7 +180,6 @@ public class BaseBlobIntegrationTest extends BaseBlobStoreIntegrationTest {
                      Blob blob = view.getBlobStore().getBlob(container, name);
                      validateMetadata(blob.getMetadata(), container, name);
                      assertEquals(hashAndClose(blob.getPayload().openStream(), md5()), supplier.hash(md5()));
-                     checkContentDisposition(blob, expectedContentDisposition);
                   } catch (IOException e) {
                      Throwables.propagate(e);
                   }
@@ -195,15 +199,13 @@ public class BaseBlobIntegrationTest extends BaseBlobStoreIntegrationTest {
 
    }
 
-   private void uploadByteSource(String container, String name, String contentDisposition,
-         ByteSource byteSource) throws IOException {
+   private void uploadByteSource(String container, String name, ByteSource byteSource) throws IOException {
       BlobStore blobStore = view.getBlobStore();
       blobStore.putBlob(container, blobStore.blobBuilder(name)
             .payload(new ByteSourcePayload(byteSource))
             .contentType("text/plain")
             .contentMD5(byteSource.hash(md5()))
             .contentLength(byteSource.size())
-            .contentDisposition(contentDisposition)
             .build());
    }
 
@@ -304,7 +306,7 @@ public class BaseBlobIntegrationTest extends BaseBlobStoreIntegrationTest {
          addObjectAndValidateContent(container, name);
          Date after = new Date(System.currentTimeMillis() + 10000);
 
-         Uninterruptibles.sleepUninterruptibly(15, TimeUnit.SECONDS);
+         awaitConsistency();
          view.getBlobStore().getBlob(container, name, ifUnmodifiedSince(after));
          validateContent(container, name);
 
@@ -365,6 +367,27 @@ public class BaseBlobIntegrationTest extends BaseBlobStoreIntegrationTest {
    }
 
    @Test(groups = { "integration", "live" })
+   public void testGetRangeOutOfRange() throws InterruptedException, IOException {
+      String container = getContainerName();
+      try {
+         String name = "apples";
+
+         addObjectAndValidateContent(container, name);
+         try {
+            view.getBlobStore().getBlob(container, name, range(TEST_STRING.length(), TEST_STRING.length() + 1));
+            throw new AssertionError("Invalid range not caught");
+         } catch (HttpResponseException e) {
+            assertThat(e.getResponse().getStatusCode()).isEqualTo(416);
+         } catch (IllegalArgumentException e) {
+            // expected
+         }
+      } finally {
+         returnContainer(container);
+      }
+
+   }
+
+   @Test(groups = { "integration", "live" })
    public void testGetRange() throws InterruptedException, IOException {
       String container = getContainerName();
       try {
@@ -375,10 +398,20 @@ public class BaseBlobIntegrationTest extends BaseBlobStoreIntegrationTest {
          Blob blob1 = view.getBlobStore().getBlob(container, name, range(0, 5));
          validateMetadata(blob1.getMetadata(), container, name);
          assertEquals(getContentAsStringOrNullAndClose(blob1), TEST_STRING.substring(0, 6));
+         assertThat(blob1.getAllHeaders().get(HttpHeaders.CONTENT_RANGE)).containsExactly("bytes 0-5/46");
 
          Blob blob2 = view.getBlobStore().getBlob(container, name, range(6, TEST_STRING.length()));
          validateMetadata(blob2.getMetadata(), container, name);
          assertEquals(getContentAsStringOrNullAndClose(blob2), TEST_STRING.substring(6, TEST_STRING.length()));
+         assertThat(blob2.getAllHeaders().get(HttpHeaders.CONTENT_RANGE)).containsExactly("bytes 6-45/46");
+
+         /* RFC 2616 14.35.1
+            "If the entity is shorter than the specified suffix-length, the
+            entire entity-body is used." */
+         Blob blob3 = view.getBlobStore().getBlob(container, name, new GetOptions().tail(TEST_STRING.length() + 10));
+         validateMetadata(blob3.getMetadata(), container, name);
+         assertEquals(getContentAsStringOrNullAndClose(blob3), TEST_STRING);
+         // not all providers return Content-Range for non-partial responses
       } finally {
          returnContainer(container);
       }
@@ -396,6 +429,32 @@ public class BaseBlobIntegrationTest extends BaseBlobStoreIntegrationTest {
          validateMetadata(blob.getMetadata(), container, name);
          assertEquals(getContentAsStringOrNullAndClose(blob), TEST_STRING);
       } finally {
+         returnContainer(container);
+      }
+   }
+
+   @Test(groups = { "integration", "live" })
+   public void testGetRangeMultipart() throws InterruptedException, IOException {
+      String container = getContainerName();
+      InputStream expect = null;
+      InputStream actual = null;
+      try {
+         String name = "apples";
+         long length = getMinimumMultipartBlobSize();
+         ByteSource byteSource = TestUtils.randomByteSource().slice(0, length);
+         Blob blob = view.getBlobStore().blobBuilder(name)
+                 .payload(byteSource)
+                 .contentLength(length)
+                 .build();
+         view.getBlobStore().putBlob(container, blob, new PutOptions().multipart(true));
+         blob = view.getBlobStore().getBlob(container, name, range(0, 5));
+         validateMetadata(blob.getMetadata(), container, name);
+         expect = byteSource.slice(0, 6).openStream();
+         actual = blob.getPayload().openStream();
+         assertThat(actual).hasContentEqualTo(expect);
+      } finally {
+         Closeables2.closeQuietly(expect);
+         Closeables2.closeQuietly(actual);
          returnContainer(container);
       }
    }
@@ -488,6 +547,7 @@ public class BaseBlobIntegrationTest extends BaseBlobStoreIntegrationTest {
          addBlobToContainer(container, name2, name2, MediaType.TEXT_PLAIN);
          awaitConsistency();
          view.getBlobStore().removeBlobs(container, ImmutableSet.of(name, name2));
+         awaitConsistency();
          assertContainerEmptyDeleting(container, name);
       } finally {
          returnContainer(container);
@@ -560,7 +620,7 @@ public class BaseBlobIntegrationTest extends BaseBlobStoreIntegrationTest {
       long length = 42;
       ByteSource byteSource = TestUtils.randomByteSource().slice(0, length);
       Payload payload = new ByteSourcePayload(byteSource);
-      testPut(payload, payload, length, new PutOptions());
+      testPut(payload, null, payload, length, new PutOptions());
    }
 
    @Test(groups = { "integration", "live" })
@@ -568,15 +628,22 @@ public class BaseBlobIntegrationTest extends BaseBlobStoreIntegrationTest {
       long length = 42;
       ByteSource byteSource = TestUtils.randomByteSource().slice(0, length);
       Payload payload = new InputStreamPayload(byteSource.openStream());
-      testPut(payload, new ByteSourcePayload(byteSource), length, new PutOptions());
+      testPut(payload, null, new ByteSourcePayload(byteSource), length, new PutOptions());
    }
 
    @Test(groups = { "integration", "live" })
    public void testPutMultipartByteSource() throws Exception {
-      long length = getMinimumMultipartBlobSize();
+      long length = Math.max(getMinimumMultipartBlobSize(), MultipartUploadSlicingAlgorithm.DEFAULT_PART_SIZE + 1);
+      BlobStore blobStore = view.getBlobStore();
+      MultipartUploadSlicingAlgorithm algorithm = new MultipartUploadSlicingAlgorithm(
+              blobStore.getMinimumMultipartPartSize(), blobStore.getMaximumMultipartPartSize(),
+              blobStore.getMaximumNumberOfParts());
+      // make sure that we are creating multiple parts
+      assertThat(algorithm.calculateChunkSize(length)).isLessThan(length);
       ByteSource byteSource = TestUtils.randomByteSource().slice(0, length);
       Payload payload = new ByteSourcePayload(byteSource);
-      testPut(payload, payload, length, new PutOptions().multipart(true));
+      HashCode hashCode = byteSource.hash(Hashing.md5());
+      testPut(payload, hashCode, payload, length, new PutOptions().multipart(true));
    }
 
    @Test(groups = { "integration", "live" })
@@ -584,7 +651,7 @@ public class BaseBlobIntegrationTest extends BaseBlobStoreIntegrationTest {
       long length = getMinimumMultipartBlobSize();
       ByteSource byteSource = TestUtils.randomByteSource().slice(0, length);
       Payload payload = new InputStreamPayload(byteSource.openStream());
-      testPut(payload, new ByteSourcePayload(byteSource), length, new PutOptions().multipart(true));
+      testPut(payload, null, new ByteSourcePayload(byteSource), length, new PutOptions().multipart(true));
    }
 
    @Test(groups = { "integration", "live" })
@@ -600,8 +667,55 @@ public class BaseBlobIntegrationTest extends BaseBlobStoreIntegrationTest {
          blobStore.setBlobAccess(containerName, blobName, BlobAccess.PUBLIC_READ);
          assertThat(blobStore.getBlobAccess(containerName, blobName)).isEqualTo(BlobAccess.PUBLIC_READ);
 
+         // test that blob is anonymously readable
+         HttpRequest request = view.getSigner().signGetBlob(containerName, blobName).toBuilder()
+                .replaceQueryParams(ImmutableMap.<String, String>of()).build();
+         HttpResponse response = view.utils().http().invoke(request);
+         assertThat(response.getStatusCode()).isEqualTo(200);
+
          blobStore.setBlobAccess(containerName, blobName, BlobAccess.PRIVATE);
          assertThat(blobStore.getBlobAccess(containerName, blobName)).isEqualTo(BlobAccess.PRIVATE);
+      } finally {
+         returnContainer(containerName);
+      }
+   }
+
+   @Test(groups = { "integration", "live" })
+   public void testPutBlobAccess() throws Exception {
+      BlobStore blobStore = view.getBlobStore();
+      String containerName = getContainerName();
+      try {
+         String blobNamePrivate = "put-access-blob-name-private";
+         Blob blobPrivate = blobStore.blobBuilder(blobNamePrivate).payload(new byte[1]).build();
+         blobStore.putBlob(containerName, blobPrivate, new PutOptions().setBlobAccess(BlobAccess.PRIVATE));
+         assertThat(blobStore.getBlobAccess(containerName, blobNamePrivate)).isEqualTo(BlobAccess.PRIVATE);
+
+         String blobNamePublic = "put-access-blob-name-public";
+         Blob blobPublic = blobStore.blobBuilder(blobNamePublic).payload(new byte[1]).build();
+         blobStore.putBlob(containerName, blobPublic, new PutOptions().setBlobAccess(BlobAccess.PUBLIC_READ));
+         assertThat(blobStore.getBlobAccess(containerName, blobNamePublic)).isEqualTo(BlobAccess.PUBLIC_READ);
+      } finally {
+         returnContainer(containerName);
+      }
+   }
+
+   @Test(groups = { "integration", "live" })
+   public void testPutBlobAccessMultipart() throws Exception {
+      BlobStore blobStore = view.getBlobStore();
+      String containerName = getContainerName();
+      ByteSource byteSource = TestUtils.randomByteSource().slice(0, getMinimumMultipartBlobSize());
+      Payload payload = Payloads.newByteSourcePayload(byteSource);
+      payload.getContentMetadata().setContentLength(byteSource.size());
+      try {
+         String blobNamePrivate = "put-access-blob-name-private";
+         Blob blobPrivate = blobStore.blobBuilder(blobNamePrivate).payload(payload).build();
+         blobStore.putBlob(containerName, blobPrivate, new PutOptions().setBlobAccess(BlobAccess.PRIVATE).multipart(true));
+         assertThat(blobStore.getBlobAccess(containerName, blobNamePrivate)).isEqualTo(BlobAccess.PRIVATE);
+
+         String blobNamePublic = "put-access-blob-name-public";
+         Blob blobPublic = blobStore.blobBuilder(blobNamePublic).payload(payload).build();
+         blobStore.putBlob(containerName, blobPublic, new PutOptions().setBlobAccess(BlobAccess.PUBLIC_READ).multipart(true));
+         assertThat(blobStore.getBlobAccess(containerName, blobNamePublic)).isEqualTo(BlobAccess.PUBLIC_READ);
       } finally {
          returnContainer(containerName);
       }
@@ -611,7 +725,7 @@ public class BaseBlobIntegrationTest extends BaseBlobStoreIntegrationTest {
       assertThat(userMetadata1).isEqualTo(userMetadata2);
    }
 
-   private void testPut(Payload payload, Payload expectedPayload, long length, PutOptions options)
+   private void testPut(Payload payload, HashCode hashCode, Payload expectedPayload, long length, PutOptions options)
          throws IOException, InterruptedException {
       BlobStore blobStore = view.getBlobStore();
       String blobName = "multipart-upload";
@@ -621,6 +735,9 @@ public class BaseBlobIntegrationTest extends BaseBlobStoreIntegrationTest {
             .payload(payload)
             .contentLength(length);
       addContentMetadata(blobBuilder);
+      if (hashCode != null) {
+         blobBuilder.contentMD5(payload.getContentMetadata().getContentMD5AsHashCode());
+      }
 
       String container = getContainerName();
       try {
@@ -648,6 +765,7 @@ public class BaseBlobIntegrationTest extends BaseBlobStoreIntegrationTest {
    }
 
    protected void checkContentMetadata(Blob blob) {
+      checkCacheControl(blob, "max-age=3600");
       checkContentType(blob, "text/csv");
       checkContentDisposition(blob, "attachment; filename=photo.jpg");
       checkContentEncoding(blob, "gzip");
@@ -655,10 +773,16 @@ public class BaseBlobIntegrationTest extends BaseBlobStoreIntegrationTest {
    }
 
    protected void addContentMetadata(PayloadBlobBuilder blobBuilder) {
+      blobBuilder.cacheControl("max-age=3600");
       blobBuilder.contentType("text/csv");
       blobBuilder.contentDisposition("attachment; filename=photo.jpg");
       blobBuilder.contentEncoding("gzip");
       blobBuilder.contentLanguage("en");
+   }
+
+   protected void checkCacheControl(Blob blob, String cacheControl) {
+      assertThat(blob.getPayload().getContentMetadata().getCacheControl()).isEqualTo(cacheControl);
+      assertThat(blob.getMetadata().getContentMetadata().getCacheControl()).isEqualTo(cacheControl);
    }
 
    protected void checkContentType(Blob blob, String contentType) {
@@ -729,7 +853,9 @@ public class BaseBlobIntegrationTest extends BaseBlobStoreIntegrationTest {
          blob.getMetadata().getUserMetadata().put("Adrian", "wonderpuff");
          blob.getMetadata().getUserMetadata().put("Adrian", "powderpuff");
 
+         awaitConsistency();
          addBlobToContainer(container, blob);
+         awaitConsistency();
          validateMetadata(view.getBlobStore().blobMetadata(container, name));
 
       } finally {
@@ -783,12 +909,12 @@ public class BaseBlobIntegrationTest extends BaseBlobStoreIntegrationTest {
             .blobBuilder(fromName)
             .userMetadata(ImmutableMap.of("key1", "value1", "key2", "value2"))
             .payload(payload)
+            .cacheControl("max-age=1800")
             .contentLength(payload.size())
             .contentDisposition("attachment; filename=original.jpg")
             .contentEncoding("compress")
             .contentLanguage("fr")
             .contentType("audio/ogg");
-      addContentMetadata(blobBuilder);
       Blob blob = blobBuilder.build();
 
       String fromContainer = getContainerName();
@@ -798,6 +924,7 @@ public class BaseBlobIntegrationTest extends BaseBlobStoreIntegrationTest {
          Map<String, String> userMetadata = ImmutableMap.of("key3", "value3", "key4", "value4");
          blobStore.copyBlob(fromContainer, fromName, toContainer, toName, CopyOptions.builder()
                .contentMetadata(ContentMetadataBuilder.create()
+                     .cacheControl("max-age=3600")
                      .contentType("text/csv")
                      .contentDisposition("attachment; filename=photo.jpg")
                      .contentEncoding("gzip")
@@ -822,13 +949,247 @@ public class BaseBlobIntegrationTest extends BaseBlobStoreIntegrationTest {
    }
 
    @Test(groups = { "integration", "live" })
+   public void testCopyIfMatch() throws Exception {
+      BlobStore blobStore = view.getBlobStore();
+      String fromName = "source";
+      String toName = "to";
+      ByteSource payload = TestUtils.randomByteSource().slice(0, 1024);
+      Blob blob = blobStore
+            .blobBuilder(fromName)
+            .payload(payload)
+            .contentLength(payload.size())
+            .build();
+      String fromContainer = getContainerName();
+      String toContainer = getContainerName();
+      try {
+         String eTag = blobStore.putBlob(fromContainer, blob);
+         blobStore.copyBlob(fromContainer, fromName, toContainer, toName, CopyOptions.builder().ifMatch(eTag).build());
+         Blob toBlob = blobStore.getBlob(toContainer, toName);
+         InputStream is = null;
+         try {
+            is = toBlob.getPayload().openStream();
+            assertEquals(ByteStreams.toByteArray(is), payload.read());
+         } finally {
+            Closeables2.closeQuietly(is);
+         }
+      } finally {
+         returnContainer(toContainer);
+         returnContainer(fromContainer);
+      }
+   }
+
+   @Test(groups = { "integration", "live" })
+   public void testCopyIfMatchNegative() throws Exception {
+      BlobStore blobStore = view.getBlobStore();
+      String fromName = "source";
+      String toName = "to";
+      ByteSource payload = TestUtils.randomByteSource().slice(0, 1024);
+      Blob blob = blobStore
+            .blobBuilder(fromName)
+            .payload(payload)
+            .contentLength(payload.size())
+            .build();
+      String fromContainer = getContainerName();
+      String toContainer = getContainerName();
+      try {
+         blobStore.putBlob(fromContainer, blob);
+         try {
+            blobStore.copyBlob(fromContainer, fromName, toContainer, toName, CopyOptions.builder().ifMatch("fake-etag").build());
+            Fail.failBecauseExceptionWasNotThrown(HttpResponseException.class);
+         } catch (HttpResponseException hre) {
+            assertThat(hre.getResponse().getStatusCode()).isEqualTo(412);
+         }
+      } finally {
+         returnContainer(toContainer);
+         returnContainer(fromContainer);
+      }
+   }
+
+   @Test(groups = { "integration", "live" })
+   public void testCopyIfNoneMatch() throws Exception {
+      BlobStore blobStore = view.getBlobStore();
+      String fromName = "source";
+      String toName = "to";
+      ByteSource payload = TestUtils.randomByteSource().slice(0, 1024);
+      Blob blob = blobStore
+            .blobBuilder(fromName)
+            .payload(payload)
+            .contentLength(payload.size())
+            .build();
+      String fromContainer = getContainerName();
+      String toContainer = getContainerName();
+      try {
+         blobStore.putBlob(fromContainer, blob);
+         blobStore.copyBlob(fromContainer, fromName, toContainer, toName, CopyOptions.builder().ifNoneMatch("fake-etag").build());
+         Blob toBlob = blobStore.getBlob(toContainer, toName);
+         InputStream is = null;
+         try {
+            is = toBlob.getPayload().openStream();
+            assertEquals(ByteStreams.toByteArray(is), payload.read());
+         } finally {
+            Closeables2.closeQuietly(is);
+         }
+      } finally {
+         returnContainer(toContainer);
+         returnContainer(fromContainer);
+      }
+   }
+
+   @Test(groups = { "integration", "live" })
+   public void testCopyIfNoneMatchNegative() throws Exception {
+      BlobStore blobStore = view.getBlobStore();
+      String fromName = "source";
+      String toName = "to";
+      ByteSource payload = TestUtils.randomByteSource().slice(0, 1024);
+      Blob blob = blobStore
+            .blobBuilder(fromName)
+            .payload(payload)
+            .contentLength(payload.size())
+            .build();
+      String fromContainer = getContainerName();
+      String toContainer = getContainerName();
+      try {
+         String eTag = blobStore.putBlob(fromContainer, blob);
+         try {
+            blobStore.copyBlob(fromContainer, fromName, toContainer, toName, CopyOptions.builder().ifNoneMatch(eTag).build());
+            Fail.failBecauseExceptionWasNotThrown(HttpResponseException.class);
+         } catch (HttpResponseException hre) {
+            assertThat(hre.getResponse().getStatusCode()).isEqualTo(412);
+         }
+      } finally {
+         returnContainer(toContainer);
+         returnContainer(fromContainer);
+      }
+   }
+
+   @Test(groups = { "integration", "live" })
+   public void testCopyIfModifiedSince() throws Exception {
+      BlobStore blobStore = view.getBlobStore();
+      String fromName = "source";
+      String toName = "to";
+      ByteSource payload = TestUtils.randomByteSource().slice(0, 1024);
+      Blob blob = blobStore
+            .blobBuilder(fromName)
+            .payload(payload)
+            .contentLength(payload.size())
+            .build();
+      String fromContainer = getContainerName();
+      String toContainer = getContainerName();
+      try {
+         blobStore.putBlob(fromContainer, blob);
+         Date before = new Date(System.currentTimeMillis() - TimeUnit.HOURS.toMillis(1));
+         blobStore.copyBlob(fromContainer, fromName, toContainer, toName, CopyOptions.builder().ifModifiedSince(before).build());
+         Blob toBlob = blobStore.getBlob(toContainer, toName);
+         InputStream is = null;
+         try {
+            is = toBlob.getPayload().openStream();
+            assertEquals(ByteStreams.toByteArray(is), payload.read());
+         } finally {
+            Closeables2.closeQuietly(is);
+         }
+      } finally {
+         returnContainer(toContainer);
+         returnContainer(fromContainer);
+      }
+   }
+
+   @Test(groups = { "integration", "live" })
+   public void testCopyIfModifiedSinceNegative() throws Exception {
+      BlobStore blobStore = view.getBlobStore();
+      String fromName = "source";
+      String toName = "to";
+      ByteSource payload = TestUtils.randomByteSource().slice(0, 1024);
+      Blob blob = blobStore
+            .blobBuilder(fromName)
+            .payload(payload)
+            .contentLength(payload.size())
+            .build();
+      String fromContainer = getContainerName();
+      String toContainer = getContainerName();
+      try {
+         blobStore.putBlob(fromContainer, blob);
+         // TODO: some problem with S3 and times in the future?
+         Date after = new Date(System.currentTimeMillis() + TimeUnit.HOURS.toMillis(1));
+         try {
+            blobStore.copyBlob(fromContainer, fromName, toContainer, toName, CopyOptions.builder().ifModifiedSince(after).build());
+            Fail.failBecauseExceptionWasNotThrown(HttpResponseException.class);
+         } catch (HttpResponseException hre) {
+            // most object stores return 412 but swift returns 304
+            assertThat(hre.getResponse().getStatusCode()).isIn(304, 412);
+         }
+      } finally {
+         returnContainer(toContainer);
+         returnContainer(fromContainer);
+      }
+   }
+
+   @Test(groups = { "integration", "live" })
+   public void testCopyIfUnmodifiedSince() throws Exception {
+      BlobStore blobStore = view.getBlobStore();
+      String fromName = "source";
+      String toName = "to";
+      ByteSource payload = TestUtils.randomByteSource().slice(0, 1024);
+      Blob blob = blobStore
+            .blobBuilder(fromName)
+            .payload(payload)
+            .contentLength(payload.size())
+            .build();
+      String fromContainer = getContainerName();
+      String toContainer = getContainerName();
+      try {
+         blobStore.putBlob(fromContainer, blob);
+         Date after = new Date(System.currentTimeMillis() + TimeUnit.HOURS.toMillis(1));
+         blobStore.copyBlob(fromContainer, fromName, toContainer, toName, CopyOptions.builder().ifUnmodifiedSince(after).build());
+         Blob toBlob = blobStore.getBlob(toContainer, toName);
+         InputStream is = null;
+         try {
+            is = toBlob.getPayload().openStream();
+            assertEquals(ByteStreams.toByteArray(is), payload.read());
+         } finally {
+            Closeables2.closeQuietly(is);
+         }
+      } finally {
+         returnContainer(toContainer);
+         returnContainer(fromContainer);
+      }
+   }
+
+   @Test(groups = { "integration", "live" })
+   public void testCopyIfUnmodifiedSinceNegative() throws Exception {
+      BlobStore blobStore = view.getBlobStore();
+      String fromName = "source";
+      String toName = "to";
+      ByteSource payload = TestUtils.randomByteSource().slice(0, 1024);
+      Blob blob = blobStore
+            .blobBuilder(fromName)
+            .payload(payload)
+            .contentLength(payload.size())
+            .build();
+      String fromContainer = getContainerName();
+      String toContainer = getContainerName();
+      try {
+         blobStore.putBlob(fromContainer, blob);
+         Date before = new Date(System.currentTimeMillis() - TimeUnit.HOURS.toMillis(1));
+         try {
+            blobStore.copyBlob(fromContainer, fromName, toContainer, toName, CopyOptions.builder().ifUnmodifiedSince(before).build());
+            Fail.failBecauseExceptionWasNotThrown(HttpResponseException.class);
+         } catch (HttpResponseException hre) {
+            assertThat(hre.getResponse().getStatusCode()).isEqualTo(412);
+         }
+      } finally {
+         returnContainer(toContainer);
+         returnContainer(fromContainer);
+      }
+   }
+
+   @Test(groups = { "integration", "live" })
    public void testMultipartUploadNoPartsAbort() throws Exception {
       BlobStore blobStore = view.getBlobStore();
       String container = getContainerName();
       try {
          String name = "blob-name";
          Blob blob = blobStore.blobBuilder(name).build();
-         MultipartUpload mpu = blobStore.initiateMultipartUpload(container, blob.getMetadata());
+         MultipartUpload mpu = blobStore.initiateMultipartUpload(container, blob.getMetadata(), new PutOptions());
 
          List<MultipartPart> parts = blobStore.listMultipartUpload(mpu);
          assertThat(parts).isEqualTo(ImmutableList.of());
@@ -854,7 +1215,7 @@ public class BaseBlobIntegrationTest extends BaseBlobStoreIntegrationTest {
                .payload(new byte[0]);
          addContentMetadata(blobBuilder);
          Blob blob = blobBuilder.build();
-         MultipartUpload mpu = blobStore.initiateMultipartUpload(container, blob.getMetadata());
+         MultipartUpload mpu = blobStore.initiateMultipartUpload(container, blob.getMetadata(), new PutOptions());
 
          ByteSource byteSource = TestUtils.randomByteSource().slice(0, 1);
          Payload payload = Payloads.newByteSourcePayload(byteSource);
@@ -888,7 +1249,7 @@ public class BaseBlobIntegrationTest extends BaseBlobStoreIntegrationTest {
                .payload(new byte[0]);
          addContentMetadata(blobBuilder);
          Blob blob = blobBuilder.build();
-         MultipartUpload mpu = blobStore.initiateMultipartUpload(container, blob.getMetadata());
+         MultipartUpload mpu = blobStore.initiateMultipartUpload(container, blob.getMetadata(), new PutOptions());
 
          ByteSource byteSource = TestUtils.randomByteSource().slice(0, blobStore.getMinimumMultipartPartSize() + 1);
          ByteSource byteSource1 = byteSource.slice(0, blobStore.getMinimumMultipartPartSize());
@@ -914,6 +1275,80 @@ public class BaseBlobIntegrationTest extends BaseBlobStoreIntegrationTest {
       }
    }
 
+   @Test(groups = { "integration", "live" })
+   public void testListMultipartUploads() throws Exception {
+      BlobStore blobStore = view.getBlobStore();
+      String name = "blob-name";
+      PayloadBlobBuilder blobBuilder = blobStore.blobBuilder(name)
+            .userMetadata(ImmutableMap.of("key1", "value1", "key2", "value2"))
+            // TODO: fake payload to add content metadata
+            .payload(new byte[0]);
+      addContentMetadata(blobBuilder);
+      Blob blob = blobBuilder.build();
+      MultipartUpload mpu = null;
+
+      String container = getContainerName();
+      try {
+         List<MultipartUpload> uploads = blobStore.listMultipartUploads(container);
+         assertThat(uploads).isEmpty();
+
+         mpu = blobStore.initiateMultipartUpload(container, blob.getMetadata(), new PutOptions());
+
+         // some providers like Azure cannot list an MPU until the first blob is uploaded
+         assertThat(uploads.size()).isBetween(0, 1);
+
+         // B2 requires at least two parts to call complete
+         ByteSource byteSource = TestUtils.randomByteSource().slice(0, blobStore.getMinimumMultipartPartSize() + 1);
+         ByteSource byteSource1 = byteSource.slice(0, blobStore.getMinimumMultipartPartSize());
+         ByteSource byteSource2 = byteSource.slice(blobStore.getMinimumMultipartPartSize(), 1);
+         Payload payload1 = Payloads.newByteSourcePayload(byteSource1);
+         Payload payload2 = Payloads.newByteSourcePayload(byteSource2);
+         payload1.getContentMetadata().setContentLength(byteSource1.size());
+         payload2.getContentMetadata().setContentLength(byteSource2.size());
+         MultipartPart part1 = blobStore.uploadMultipartPart(mpu, 1, payload1);
+         MultipartPart part2 = blobStore.uploadMultipartPart(mpu, 2, payload2);
+
+         uploads = blobStore.listMultipartUploads(container);
+         assertThat(uploads).hasSize(1);
+
+         blobStore.completeMultipartUpload(mpu, ImmutableList.of(part1, part2));
+         mpu = null;
+
+         uploads = blobStore.listMultipartUploads(container);
+         assertThat(uploads).isEmpty();
+
+         // cannot test abort since Azure does not have explicit support
+      } finally {
+         if (mpu != null) {
+            blobStore.abortMultipartUpload(mpu);
+         }
+         returnContainer(container);
+      }
+   }
+
+   @Test(groups = { "integration", "live" }, expectedExceptions = {KeyNotFoundException.class})
+   public void testCopy404BlobFail() throws Exception {
+      BlobStore blobStore = view.getBlobStore();
+      String container = getContainerName();
+      try {
+         blobStore.copyBlob(container, "blob", container, "blob2", CopyOptions.NONE);
+      } finally {
+         returnContainer(container);
+      }
+   }
+
+   @Test(groups = { "integration", "live" }, expectedExceptions = {KeyNotFoundException.class})
+   public void testCopy404BlobMetaFail() throws Exception {
+      BlobStore blobStore = view.getBlobStore();
+      String container = getContainerName();
+      try {
+         blobStore.copyBlob(container, "blob", container, "blob2",
+               CopyOptions.builder().userMetadata(ImmutableMap.of("x", "1")).build());
+      } finally {
+         returnContainer(container);
+      }
+   }
+
    protected void validateMetadata(BlobMetadata metadata) throws IOException {
       assert metadata.getContentMetadata().getContentType().startsWith("text/plain") : metadata.getContentMetadata()
                .getContentType();
@@ -929,11 +1364,5 @@ public class BaseBlobIntegrationTest extends BaseBlobStoreIntegrationTest {
    /** @return ByteSource containing a random length 0..length of random bytes. */
    private static ByteSource createTestInput(int length) {
       return TestUtils.randomByteSource().slice(0, new Random().nextInt(length));
-   }
-
-   protected void awaitConsistency() {
-      if (view.getConsistencyModel() == ConsistencyModel.EVENTUAL) {
-         Uninterruptibles.sleepUninterruptibly(10, TimeUnit.SECONDS);
-      }
    }
 }

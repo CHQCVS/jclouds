@@ -154,8 +154,8 @@ public class JschSshClient implements SshClient {
    }
 
    private void checkConnected() {
-      checkState(sessionConnection.getSession() != null && sessionConnection.getSession().isConnected(), String.format(
-               "(%s) Session not connected!", toString()));
+      checkState(sessionConnection.getSession() != null && sessionConnection.getSession().isConnected(),
+               "(%s) Session not connected!", this);
    }
 
    public interface Connection<T> {
@@ -190,8 +190,7 @@ public class JschSshClient implements SshClient {
             }
          }
       }
-      assert false : "should not reach here";
-      return null;
+      throw new AssertionError("should not reach here");
    }
 
    public void connect() {

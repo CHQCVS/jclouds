@@ -16,6 +16,8 @@
  */
 package org.jclouds.filesystem.integration;
 
+import static org.jclouds.filesystem.util.Utils.isMacOSX;
+
 import java.io.IOException;
 import java.util.Map;
 import java.util.Properties;
@@ -27,6 +29,7 @@ import org.jclouds.blobstore.integration.internal.BaseBlobStoreIntegrationTest;
 import org.jclouds.filesystem.reference.FilesystemConstants;
 import org.jclouds.filesystem.utils.TestUtils;
 import org.testng.annotations.Test;
+import org.testng.SkipException;
 
 @Test(groups = { "integration" }, singleThreaded = true,  testName = "blobstore.FilesystemBlobIntegrationTest")
 public class FilesystemBlobIntegrationTest extends BaseBlobIntegrationTest {
@@ -46,7 +49,7 @@ public class FilesystemBlobIntegrationTest extends BaseBlobIntegrationTest {
    // https://bugs.openjdk.java.net/browse/JDK-8030048
    @Override
    public void checkContentMetadata(Blob blob) {
-      if (!org.jclouds.utils.TestUtils.isMacOSX()) {
+      if (!isMacOSX()) {
          super.checkContentMetadata(blob);
       }
    }
@@ -55,7 +58,7 @@ public class FilesystemBlobIntegrationTest extends BaseBlobIntegrationTest {
    // https://bugs.openjdk.java.net/browse/JDK-8030048
    @Override
    protected void checkContentDisposition(Blob blob, String contentDisposition) {
-      if (!org.jclouds.utils.TestUtils.isMacOSX()) {
+      if (!isMacOSX()) {
          super.checkContentDisposition(blob, contentDisposition);
       }
    }
@@ -64,7 +67,7 @@ public class FilesystemBlobIntegrationTest extends BaseBlobIntegrationTest {
    // https://bugs.openjdk.java.net/browse/JDK-8030048
    @Override
    protected void validateMetadata(BlobMetadata metadata) throws IOException {
-      if (!org.jclouds.utils.TestUtils.isMacOSX()) {
+      if (!isMacOSX()) {
          super.validateMetadata(metadata);
       }
    }
@@ -81,8 +84,22 @@ public class FilesystemBlobIntegrationTest extends BaseBlobIntegrationTest {
     * uses to implement user metadata */
    @Override
    protected void checkUserMetadata(Map<String, String> userMetadata1, Map<String, String> userMetadata2) {
-      if (!org.jclouds.utils.TestUtils.isMacOSX()) {
+      if (!isMacOSX()) {
          super.checkUserMetadata(userMetadata1, userMetadata2);
+      }
+   }
+
+   @Override
+   public void testSetBlobAccess() throws Exception {
+      throw new SkipException("filesystem does not support anonymous access");
+   }
+
+   @Test(groups = { "integration", "live" })
+   public void testListMultipartUploads() throws Exception {
+      try {
+         super.testListMultipartUploads();
+      } catch (UnsupportedOperationException uoe) {
+         throw new SkipException("filesystem does not support listing multipart uploads");
       }
    }
 }

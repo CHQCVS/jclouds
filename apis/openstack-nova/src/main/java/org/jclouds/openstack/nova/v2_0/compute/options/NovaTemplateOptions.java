@@ -122,13 +122,13 @@ public class NovaTemplateOptions extends TemplateOptions implements Cloneable {
             && equal(this.diskConfig, that.diskConfig)
             && equal(this.configDrive, that.configDrive)
             && equal(this.novaNetworks, that.novaNetworks)
-            && equal(this.availabilityZone, that.availabilityZone)
-            && equal(this.schedulerHints, that.schedulerHints);
+            && equal(this.availabilityZone, that.availabilityZone);
    }
 
    @Override
+   @SuppressWarnings("ArrayHashCode")
    public int hashCode() {
-      return Objects.hashCode(super.hashCode(), autoAssignFloatingIp, floatingIpPoolNames, generateKeyPair, keyPairName, 
+      return Objects.hashCode(super.hashCode(), autoAssignFloatingIp, floatingIpPoolNames, generateKeyPair, keyPairName,
               userData, diskConfig, configDrive, novaNetworks, availabilityZone, schedulerHints);
    }
 

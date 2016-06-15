@@ -136,7 +136,7 @@ public final class ReadOnlyBlobStore extends ForwardingBlobStore {
    }
 
    @Override
-   public MultipartUpload initiateMultipartUpload(String container, BlobMetadata blobMetadata) {
+   public MultipartUpload initiateMultipartUpload(String container, BlobMetadata blobMetadata, PutOptions options) {
       throw new UnsupportedOperationException("Read-only BlobStore");
    }
 
@@ -157,6 +157,12 @@ public final class ReadOnlyBlobStore extends ForwardingBlobStore {
 
    @Override
    public List<MultipartPart> listMultipartUpload(MultipartUpload mpu) {
+      throw new UnsupportedOperationException("Read-only BlobStore");
+   }
+
+   // TODO: should ReadOnlyBlobStore allow listing parts and uploads?
+   @Override
+   public List<MultipartUpload> listMultipartUploads(String container) {
       throw new UnsupportedOperationException("Read-only BlobStore");
    }
 }

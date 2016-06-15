@@ -56,6 +56,7 @@ import org.jclouds.s3.domain.AccessControlList.GroupGranteeURI;
 import org.jclouds.s3.domain.AccessControlList.Permission;
 import org.jclouds.s3.domain.CannedAccessPolicy;
 import org.jclouds.s3.domain.DeleteResult;
+import org.jclouds.s3.domain.ListMultipartUploadsResponse;
 import org.jclouds.s3.domain.ObjectMetadata;
 import org.jclouds.s3.domain.ObjectMetadataBuilder;
 import org.jclouds.s3.domain.S3Object;
@@ -531,22 +532,66 @@ public class S3ClientLiveTest extends BaseBlobStoreIntegrationTest {
          }
          assertThat(getApi().listMultipartParts(containerName, key, uploadId)).containsOnlyKeys(1);
 
-         String eTag = getApi().completeMultipartUpload(containerName, key, uploadId, ImmutableMap.of(1, eTagOf1));
-
-         assert !eTagOf1.equals(eTag);
+         getApi().completeMultipartUpload(containerName, key, uploadId, ImmutableMap.of(1, eTagOf1));
 
          object = getApi().getObject(containerName, key);
          assertEquals(ByteStreams2.toByteArrayAndClose(object.getPayload().openStream()), buffer);
-
-         // noticing amazon does not return content-md5 header or a parsable ETag after a multi-part
-         // upload is complete:
-         // https://forums.aws.amazon.com/thread.jspa?threadID=61344
-         assertEquals(object.getPayload().getContentMetadata().getContentMD5(), null);
-         assertEquals(getApi().headObject(containerName, key).getContentMetadata().getContentMD5(), null);
-
       } finally {
          if (object != null)
             object.getPayload().close();
+         returnContainer(containerName);
+      }
+   }
+
+   public void testMultipartCopy() throws Exception {
+      String containerName = getContainerName();
+      try {
+         String fromObject = "fromObject";
+         S3Object object = getApi().newS3Object();
+         object.getMetadata().setKey(fromObject);
+         object.setPayload(oneHundredOneConstitutions);
+         object.getMetadata().getContentMetadata().setContentLength(oneHundredOneConstitutions.size());
+         getApi().putObject(containerName, object);
+
+         String toObject = "toObject";
+         String uploadId = getApi().initiateMultipartUpload(containerName, ObjectMetadataBuilder.create().key(toObject).build());
+
+         String eTagOf1 = getApi().uploadPartCopy(containerName, toObject, 1, uploadId, containerName, fromObject, 1, oneHundredOneConstitutions.size() - 1);
+
+         getApi().completeMultipartUpload(containerName, toObject, uploadId, ImmutableMap.of(1, eTagOf1));
+
+         object = getApi().getObject(containerName, toObject);
+         assertEquals(ByteStreams2.toByteArrayAndClose(object.getPayload().openStream()), oneHundredOneConstitutions.slice(1, oneHundredOneConstitutions.size() - 1).read());
+      } finally {
+         returnContainer(containerName);
+      }
+   }
+
+   public void testListMultipartUploads() throws Exception {
+      String containerName = getContainerName();
+      String key = "testListMultipartUploads";
+      String uploadId = null;
+      try {
+         ListMultipartUploadsResponse response = getApi().listMultipartUploads(containerName, null, null, null, null, null);
+         assertThat(response.bucket()).isEqualTo(containerName);
+         assertThat(response.isTruncated()).isFalse();
+         assertThat(response.uploads()).isEmpty();
+
+         uploadId = getApi().initiateMultipartUpload(containerName, ObjectMetadataBuilder.create().key(key).build());
+
+         response = getApi().listMultipartUploads(containerName, null, null, null, null, null);
+         assertThat(response.bucket()).isEqualTo(containerName);
+         assertThat(response.isTruncated()).isFalse();
+         assertThat(response.uploads()).hasSize(1);
+
+         ListMultipartUploadsResponse.Upload upload = response.uploads().get(0);
+         assertThat(upload.key()).isEqualTo(key);
+         assertThat(upload.uploadId()).isEqualTo(uploadId);
+         assertThat(upload.storageClass()).isEqualTo(ObjectMetadata.StorageClass.STANDARD);
+      } finally {
+         if (uploadId != null) {
+            getApi().abortMultipartUpload(containerName, key, uploadId);
+         }
          returnContainer(containerName);
       }
    }
@@ -598,4 +643,42 @@ public class S3ClientLiveTest extends BaseBlobStoreIntegrationTest {
       acl.addPermission(new CanonicalUserGrantee(ownerId), Permission.WRITE_ACP);
    }
 
+   public void testUpdateBucketCannedACL() throws Exception {
+      String containerName = getContainerName();
+      try {
+         getApi().updateBucketCannedACL(containerName, CannedAccessPolicy.PUBLIC_READ);
+         AccessControlList acl = getApi().getBucketACL(containerName);
+         assertThat(acl.hasPermission(GroupGranteeURI.ALL_USERS, Permission.READ)).isTrue();
+
+         getApi().updateBucketCannedACL(containerName, CannedAccessPolicy.PRIVATE);
+         acl = getApi().getBucketACL(containerName);
+         assertThat(acl.hasPermission(GroupGranteeURI.ALL_USERS, Permission.READ)).isFalse();
+      } finally {
+         recycleContainerAndAddToPool(containerName);
+      }
+   }
+
+   public void testUpdateObjectCannedACL() throws Exception {
+      String containerName = getContainerName();
+      try {
+         String key = "testUpdateObjectCannedACL";
+         S3Object object = getApi().newS3Object();
+         object.getMetadata().setKey(key);
+         object.setPayload(TEST_STRING);
+         getApi().putObject(containerName, object);
+
+         getApi().updateObjectCannedACL(containerName, key, CannedAccessPolicy.PUBLIC_READ);
+         AccessControlList acl = getApi().getObjectACL(containerName, key);
+         assertThat(acl.hasPermission(GroupGranteeURI.ALL_USERS, Permission.READ)).isTrue();
+
+         getApi().updateObjectCannedACL(containerName, key, CannedAccessPolicy.PRIVATE);
+         acl = getApi().getObjectACL(containerName, key);
+         assertThat(acl.hasPermission(GroupGranteeURI.ALL_USERS, Permission.READ)).isFalse();
+
+         object = getApi().getObject(containerName, key);
+         assertThat(Strings2.toStringAndClose(object.getPayload().openStream())).isEqualTo(TEST_STRING);
+      } finally {
+         returnContainer(containerName);
+      }
+   }
 }

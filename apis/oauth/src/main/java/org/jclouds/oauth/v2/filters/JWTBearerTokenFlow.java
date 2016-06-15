@@ -56,29 +56,16 @@ public class JWTBearerTokenFlow implements OAuthFilter {
    private final long tokenDuration;
    private final LoadingCache<Claims, Token> tokenCache;
 
-   public static class TestJWTBearerTokenFlow extends JWTBearerTokenFlow {
-
-      @Inject TestJWTBearerTokenFlow(AuthorizeToken loader, @Named(PROPERTY_SESSION_INTERVAL) long tokenDuration,
-            @Named(AUDIENCE) String audience, @Provider Supplier<Credentials> credentialsSupplier, OAuthScopes scopes) {
-         super(loader, tokenDuration, audience, credentialsSupplier, scopes);
-      }
-
-      /** Constant time for testing. */
-      long currentTimeSeconds() {
-         return 0;
-      }
-   }
-
    @Inject JWTBearerTokenFlow(AuthorizeToken loader, @Named(PROPERTY_SESSION_INTERVAL) long tokenDuration,
-         @Named(AUDIENCE) String audience, @Provider Supplier<Credentials> credentialsSupplier, OAuthScopes scopes) {
-      this.audience = audience;
+         @Provider Supplier<Credentials> credentialsSupplier, OAuthScopes scopes, @Named(AUDIENCE) String audience) {
       this.credentialsSupplier = credentialsSupplier;
       this.scopes = scopes;
+      this.audience = audience;
       this.tokenDuration = tokenDuration;
       // since the session interval is also the token expiration time requested to the server make the token expire a
       // bit before the deadline to make sure there aren't session expiration exceptions
       long cacheExpirationSeconds = tokenDuration > 30 ? tokenDuration - 30 : tokenDuration;
-      this.tokenCache = CacheBuilder.newBuilder().expireAfterWrite(tokenDuration, SECONDS).build(loader);
+      this.tokenCache = CacheBuilder.newBuilder().expireAfterWrite(cacheExpirationSeconds, SECONDS).build(loader);
    }
 
    static final class AuthorizeToken extends CacheLoader<Claims, Token> {

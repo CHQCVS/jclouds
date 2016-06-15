@@ -23,6 +23,8 @@ import static org.jclouds.util.Predicates2.retry;
 
 import java.io.InputStream;
 import java.io.IOException;
+import java.util.Date;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -34,20 +36,31 @@ import org.jclouds.blobstore.ContainerNotFoundException;
 import org.jclouds.blobstore.KeyNotFoundException;
 import org.jclouds.blobstore.domain.Blob;
 import org.jclouds.blobstore.domain.BlobBuilder;
+import org.jclouds.blobstore.domain.MultipartPart;
+import org.jclouds.blobstore.domain.MultipartUpload;
 import org.jclouds.blobstore.domain.PageSet;
 import org.jclouds.blobstore.domain.StorageMetadata;
 import org.jclouds.blobstore.options.CopyOptions;
 import org.jclouds.blobstore.options.ListContainerOptions;
+import org.jclouds.blobstore.options.PutOptions;
+import org.jclouds.blobstore.strategy.internal.MultipartUploadSlicingAlgorithm;
 import org.jclouds.blobstore.util.BlobUtils;
 import org.jclouds.collect.Memoized;
 import org.jclouds.domain.Location;
+import org.jclouds.http.HttpCommand;
+import org.jclouds.http.HttpRequest;
+import org.jclouds.http.HttpResponse;
+import org.jclouds.http.HttpResponseException;
 import org.jclouds.io.ContentMetadata;
+import org.jclouds.io.Payload;
+import org.jclouds.io.PayloadSlicer;
 import org.jclouds.util.Closeables2;
 
-import com.google.common.base.Optional;
+import com.google.common.annotations.Beta;
 import com.google.common.base.Predicate;
 import com.google.common.base.Supplier;
 import com.google.common.base.Throwables;
+import com.google.common.collect.Lists;
 
 public abstract class BaseBlobStore implements BlobStore {
 
@@ -55,14 +68,16 @@ public abstract class BaseBlobStore implements BlobStore {
    protected final BlobUtils blobUtils;
    protected final Supplier<Location> defaultLocation;
    protected final Supplier<Set<? extends Location>> locations;
+   protected final PayloadSlicer slicer;
 
    @Inject
    protected BaseBlobStore(BlobStoreContext context, BlobUtils blobUtils, Supplier<Location> defaultLocation,
-         @Memoized Supplier<Set<? extends Location>> locations) {
+         @Memoized Supplier<Set<? extends Location>> locations, PayloadSlicer slicer) {
       this.context = checkNotNull(context, "context");
       this.blobUtils = checkNotNull(blobUtils, "blobUtils");
       this.defaultLocation = checkNotNull(defaultLocation, "defaultLocation");
       this.locations = checkNotNull(locations, "locations");
+      this.slicer = checkNotNull(slicer, "slicer");
    }
 
    @Override
@@ -248,23 +263,52 @@ public abstract class BaseBlobStore implements BlobStore {
          throw new KeyNotFoundException(fromContainer, fromName, "while copying");
       }
 
+      String eTag = blob.getMetadata().getETag();
+      if (eTag != null) {
+         eTag = maybeQuoteETag(eTag);
+         if (options.ifMatch() != null && !maybeQuoteETag(options.ifMatch()).equals(eTag)) {
+            throw returnResponseException(412);
+         }
+         if (options.ifNoneMatch() != null && maybeQuoteETag(options.ifNoneMatch()).equals(eTag)) {
+            throw returnResponseException(412);
+         }
+      }
+
+      Date lastModified = blob.getMetadata().getLastModified();
+      if (lastModified != null) {
+         if (options.ifModifiedSince() != null && lastModified.compareTo(options.ifModifiedSince()) <= 0) {
+            throw returnResponseException(412);
+         }
+         if (options.ifUnmodifiedSince() != null && lastModified.compareTo(options.ifUnmodifiedSince()) >= 0) {
+            throw returnResponseException(412);
+         }
+      }
+
       InputStream is = null;
       try {
          is = blob.getPayload().openStream();
-         ContentMetadata metadata = blob.getMetadata().getContentMetadata();
          BlobBuilder.PayloadBlobBuilder builder = blobBuilder(toName)
-               .payload(is)
+               .payload(is);
+         Long contentLength = blob.getMetadata().getContentMetadata().getContentLength();
+         if (contentLength != null) {
+            builder.contentLength(contentLength);
+         }
+
+         ContentMetadata metadata;
+         if (options.contentMetadata() != null) {
+            metadata = options.contentMetadata();
+         } else {
+            metadata = blob.getMetadata().getContentMetadata();
+         }
+         builder.cacheControl(metadata.getCacheControl())
                .contentDisposition(metadata.getContentDisposition())
                .contentEncoding(metadata.getContentEncoding())
                .contentLanguage(metadata.getContentLanguage())
                .contentType(metadata.getContentType());
-         Long contentLength = metadata.getContentLength();
-         if (contentLength != null) {
-            builder.contentLength(contentLength);
-         }
-         Optional<Map<String, String>> userMetadata = options.getUserMetadata();
-         if (userMetadata.isPresent()) {
-            builder.userMetadata(userMetadata.get());
+
+         Map<String, String> userMetadata = options.userMetadata();
+         if (userMetadata != null) {
+            builder.userMetadata(userMetadata);
          } else {
             builder.userMetadata(blob.getMetadata().getUserMetadata());
          }
@@ -274,5 +318,42 @@ public abstract class BaseBlobStore implements BlobStore {
       } finally {
          Closeables2.closeQuietly(is);
       }
+   }
+
+   // TODO: parallel uploads
+   @Beta
+   protected String putMultipartBlob(String container, Blob blob, PutOptions overrides) {
+      MultipartUpload mpu = initiateMultipartUpload(container, blob.getMetadata(), overrides);
+      try {
+         List<MultipartPart> parts = Lists.newArrayList();
+         long contentLength = blob.getMetadata().getContentMetadata().getContentLength();
+         MultipartUploadSlicingAlgorithm algorithm = new MultipartUploadSlicingAlgorithm(
+               getMinimumMultipartPartSize(), getMaximumMultipartPartSize(), getMaximumNumberOfParts());
+         long partSize = algorithm.calculateChunkSize(contentLength);
+         int partNumber = 1;
+         for (Payload payload : slicer.slice(blob.getPayload(), partSize)) {
+            MultipartPart part = uploadMultipartPart(mpu, partNumber, payload);
+            parts.add(part);
+            ++partNumber;
+         }
+         return completeMultipartUpload(mpu, parts);
+      } catch (RuntimeException re) {
+         abortMultipartUpload(mpu);
+         throw re;
+      }
+   }
+
+   private static HttpResponseException returnResponseException(int code) {
+      HttpResponse response = HttpResponse.builder().statusCode(code).build();
+      // TODO: bogus endpoint
+      return new HttpResponseException(new HttpCommand(HttpRequest.builder().method("GET").endpoint("http://stub")
+            .build()), response);
+   }
+
+   private static String maybeQuoteETag(String eTag) {
+      if (!eTag.startsWith("\"") && !eTag.endsWith("\"")) {
+         eTag = "\"" + eTag + "\"";
+      }
+      return eTag;
    }
 }

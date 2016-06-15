@@ -51,6 +51,7 @@ import org.jclouds.openstack.nova.v2_0.compute.NovaComputeService;
 import org.jclouds.openstack.nova.v2_0.compute.NovaComputeServiceAdapter;
 import org.jclouds.openstack.nova.v2_0.compute.extensions.NovaImageExtension;
 import org.jclouds.openstack.nova.v2_0.compute.extensions.NovaSecurityGroupExtension;
+import org.jclouds.openstack.nova.v2_0.compute.functions.CleanupServer;
 import org.jclouds.openstack.nova.v2_0.compute.functions.CreateSecurityGroupIfNeeded;
 import org.jclouds.openstack.nova.v2_0.compute.functions.FlavorInRegionToHardware;
 import org.jclouds.openstack.nova.v2_0.compute.functions.ImageInRegionToImage;
@@ -80,7 +81,6 @@ import org.jclouds.openstack.nova.v2_0.predicates.FindSecurityGroupWithNameAndRe
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Function;
-import com.google.common.base.Optional;
 import com.google.common.base.Predicate;
 import com.google.common.base.Supplier;
 import com.google.common.base.Suppliers;
@@ -160,6 +160,9 @@ public class NovaComputeServiceContextModule extends
 
       bind(new TypeLiteral<SecurityGroupExtension>() {
       }).to(NovaSecurityGroupExtension.class);
+
+      bind(new TypeLiteral<Function<String, Boolean>>() {
+      }).to(CleanupServer.class);
    }
 
    @Override
@@ -174,14 +177,14 @@ public class NovaComputeServiceContextModule extends
    @Provides
    @Singleton
    @Named("FLOATINGIP")
-   protected LoadingCache<RegionAndId, Iterable<? extends FloatingIP>> instanceToFloatingIps(
+   protected final LoadingCache<RegionAndId, Iterable<? extends FloatingIP>> instanceToFloatingIps(
             @Named("FLOATINGIP") CacheLoader<RegionAndId, Iterable<? extends FloatingIP>> in) {
       return CacheBuilder.newBuilder().build(in);
    }
 
    @Provides
    @Singleton
-   protected LoadingCache<RegionAndName, SecurityGroupInRegion> securityGroupMap(
+   protected final LoadingCache<RegionAndName, SecurityGroupInRegion> securityGroupMap(
             CacheLoader<RegionAndName, SecurityGroupInRegion> in) {
       return CacheBuilder.newBuilder().build(in);
    }
@@ -195,7 +198,7 @@ public class NovaComputeServiceContextModule extends
    @Provides
    @Singleton
    @Named("SECURITYGROUP_PRESENT")
-   protected Predicate<AtomicReference<RegionAndName>> securityGroupEventualConsistencyDelay(
+   protected final Predicate<AtomicReference<RegionAndName>> securityGroupEventualConsistencyDelay(
             FindSecurityGroupWithNameAndReturnTrue in,
             @Named(TIMEOUT_SECURITYGROUP_PRESENT) long msDelay) {
       return retry(in, msDelay, 100l, MILLISECONDS);
@@ -203,14 +206,14 @@ public class NovaComputeServiceContextModule extends
 
    @Provides
    @Singleton
-   protected LoadingCache<RegionAndName, KeyPair> keyPairMap(
+   protected final LoadingCache<RegionAndName, KeyPair> keyPairMap(
          CacheLoader<RegionAndName, KeyPair> in) {
       return CacheBuilder.newBuilder().build(in);
    }
 
    @Provides
    @Singleton
-   protected Supplier<Map<String, Location>> createLocationIndexedById(
+   protected final Supplier<Map<String, Location>> createLocationIndexedById(
             @Memoized Supplier<Set<? extends Location>> locations) {
       return Suppliers.compose(new Function<Set<? extends Location>, Map<String, Location>>() {
 
@@ -261,7 +264,7 @@ public class NovaComputeServiceContextModule extends
 
    @Singleton
    @Provides
-   protected Map<Server.Status, NodeMetadata.Status> toPortableNodeStatus() {
+   protected final Map<Server.Status, NodeMetadata.Status> toPortableNodeStatus() {
       return toPortableNodeStatus;
    }
 
@@ -277,17 +280,7 @@ public class NovaComputeServiceContextModule extends
 
    @Singleton
    @Provides
-   protected Map<org.jclouds.openstack.nova.v2_0.domain.Image.Status, Image.Status> toPortableImageStatus() {
+   protected final Map<org.jclouds.openstack.nova.v2_0.domain.Image.Status, Image.Status> toPortableImageStatus() {
       return toPortableImageStatus;
-   }
-
-   @Override
-   protected Optional<ImageExtension> provideImageExtension(Injector i) {
-      return Optional.of(i.getInstance(ImageExtension.class));
-   }
-
-   @Override
-   protected Optional<SecurityGroupExtension> provideSecurityGroupExtension(Injector i) {
-      return Optional.of(i.getInstance(SecurityGroupExtension.class));
    }
 }

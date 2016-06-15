@@ -333,7 +333,7 @@ public interface BlobStore {
    long countBlobs(String container, ListContainerOptions options);
 
    @Beta
-   MultipartUpload initiateMultipartUpload(String container, BlobMetadata blob);
+   MultipartUpload initiateMultipartUpload(String container, BlobMetadata blob, PutOptions options);
 
    @Beta
    // TODO: take parts?
@@ -347,6 +347,9 @@ public interface BlobStore {
 
    @Beta
    List<MultipartPart> listMultipartUpload(MultipartUpload mpu);
+
+   @Beta
+   List<MultipartUpload> listMultipartUploads(String container);
 
    @Beta
    long getMinimumMultipartPartSize();

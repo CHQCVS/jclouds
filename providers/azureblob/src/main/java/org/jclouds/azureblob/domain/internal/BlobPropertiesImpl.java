@@ -46,7 +46,8 @@ public class BlobPropertiesImpl implements BlobProperties {
    private final LeaseStatus leaseStatus;
    private final BaseImmutableContentMetadata contentMetadata;
 
-   public BlobPropertiesImpl(BlobType type, String name, String container, URI url, Date lastModified, String eTag,
+   // TODO: should this take Cache-Control as well?
+   public BlobPropertiesImpl(BlobType type, String name, String container, URI url, @Nullable Date lastModified, @Nullable String eTag,
             long size, String contentType, @Nullable byte[] contentMD5, @Nullable String contentMetadata,
             @Nullable String contentLanguage, @Nullable Date currentExpires, LeaseStatus leaseStatus, 
             Map<String, String> metadata) {
@@ -55,8 +56,8 @@ public class BlobPropertiesImpl implements BlobProperties {
       this.name = checkNotNull(name, "name");
       this.container = checkNotNull(container, "container");
       this.url = checkNotNull(url, "url");
-      this.lastModified = checkNotNull(lastModified, "lastModified");
-      this.eTag = checkNotNull(eTag, "eTag");
+      this.lastModified = lastModified;
+      this.eTag = eTag;
       this.contentMetadata = new BaseImmutableContentMetadata(contentType, size, contentMD5, null, contentLanguage,
                contentMetadata, currentExpires);
       this.metadata.putAll(checkNotNull(metadata, "metadata"));

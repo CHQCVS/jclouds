@@ -220,8 +220,8 @@ public abstract class ForwardingBlobStore extends ForwardingObject
    }
 
    @Override
-   public MultipartUpload initiateMultipartUpload(String container, BlobMetadata blobMetadata) {
-      return delegate().initiateMultipartUpload(container, blobMetadata);
+   public MultipartUpload initiateMultipartUpload(String container, BlobMetadata blobMetadata, PutOptions options) {
+      return delegate().initiateMultipartUpload(container, blobMetadata, options);
    }
 
    @Override
@@ -242,6 +242,11 @@ public abstract class ForwardingBlobStore extends ForwardingObject
    @Override
    public List<MultipartPart> listMultipartUpload(MultipartUpload mpu) {
       return delegate().listMultipartUpload(mpu);
+   }
+
+   @Override
+   public List<MultipartUpload> listMultipartUploads(String container) {
+      return delegate().listMultipartUploads(container);
    }
 
    @Override

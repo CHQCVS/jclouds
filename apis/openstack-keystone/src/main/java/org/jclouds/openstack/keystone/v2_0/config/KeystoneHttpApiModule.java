@@ -36,7 +36,7 @@ import org.jclouds.openstack.keystone.v2_0.suppliers.RegionIdToAdminURIFromAcces
 import org.jclouds.openstack.keystone.v2_0.suppliers.RegionIdToAdminURISupplier;
 import org.jclouds.openstack.v2_0.ServiceType;
 import org.jclouds.openstack.v2_0.domain.Extension;
-import org.jclouds.openstack.v2_0.functions.PresentWhenExtensionAnnotationNamespaceEqualsAnyNamespaceInExtensionsSet;
+import org.jclouds.openstack.v2_0.functions.PresentWhenExtensionAnnotationMatchesExtensionSet;
 import org.jclouds.openstack.v2_0.services.Identity;
 import org.jclouds.rest.ConfiguresHttpApi;
 import org.jclouds.rest.annotations.ApiVersion;
@@ -79,7 +79,7 @@ public class KeystoneHttpApiModule extends HttpApiModule<KeystoneApi> {
       @Provides
       @Singleton
       @Identity
-      protected Supplier<URI> provideStorageUrl(final RegionIdToAdminURISupplier.Factory factory,
+      protected final Supplier<URI> provideStorageUrl(final RegionIdToAdminURISupplier.Factory factory,
                @ApiVersion final String version, @Provider final Supplier<URI> providerURI) {
          Supplier<URI> identityServiceForVersion = getLastValueInMap(factory.createForApiTypeAndVersion(
                   ServiceType.IDENTITY, version));
@@ -92,20 +92,20 @@ public class KeystoneHttpApiModule extends HttpApiModule<KeystoneApi> {
    }
 
    // Allow providers to cleanly contribute their own aliases
-   public static MapBinder<URI, URI> aliasBinder(Binder binder) {
-      return MapBinder.newMapBinder(binder, URI.class, URI.class, Aliases.class).permitDuplicates();
+   public static MapBinder<URI, URI> namespaceAliasBinder(Binder binder) {
+      return MapBinder.newMapBinder(binder, URI.class, URI.class, NamespaceAliases.class).permitDuplicates();
    }
 
    @Override
    protected void configure() {
-      bind(ImplicitOptionalConverter.class).to(PresentWhenExtensionAnnotationNamespaceEqualsAnyNamespaceInExtensionsSet.class);
+      bind(ImplicitOptionalConverter.class).to(PresentWhenExtensionAnnotationMatchesExtensionSet.class);
       super.configure();
-      aliasBinder(binder());
+      namespaceAliasBinder(binder());
    }
 
    @Provides
    @Singleton
-   public LoadingCache<String, Set<? extends Extension>> provideExtensionsByRegion(final javax.inject.Provider<KeystoneApi> keystoneApi) {
+   public final LoadingCache<String, Set<? extends Extension>> provideExtensionsByRegion(final javax.inject.Provider<KeystoneApi> keystoneApi) {
       return CacheBuilder.newBuilder().expireAfterWrite(23, TimeUnit.HOURS)
             .build(CacheLoader.from(Suppliers.memoize(new Supplier<Set<? extends Extension>>() {
                @Override

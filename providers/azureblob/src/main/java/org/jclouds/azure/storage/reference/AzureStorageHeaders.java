@@ -23,6 +23,12 @@ package org.jclouds.azure.storage.reference;
  */
 public final class AzureStorageHeaders {
 
+   public static final String CACHE_CONTROL = "x-ms-blob-cache-control";
+   public static final String CONTENT_DISPOSITION = "x-ms-blob-content-disposition";
+   public static final String CONTENT_ENCODING = "x-ms-blob-content-encoding";
+   public static final String CONTENT_LANGUAGE = "x-ms-blob-content-language";
+   public static final String CONTENT_TYPE = "x-ms-blob-content-type";
+
    public static final String USER_METADATA_PREFIX = "x-ms-meta-";
 
    public static final String COPY_SOURCE = "x-ms-copy-source";

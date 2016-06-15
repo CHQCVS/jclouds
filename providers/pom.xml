@@ -36,6 +36,7 @@
     <module>aws-ec2</module>
     <module>aws-sqs</module>
     <module>aws-cloudwatch</module>
+    <module>digitalocean2</module>
     <module>elastichosts-lon-p</module>
     <module>elastichosts-sat-p</module>
     <module>elastichosts-lon-b</module>
@@ -45,16 +46,14 @@
     <module>elastichosts-sjc-c</module>
     <module>elastichosts-hkg-e</module>
     <module>elastichosts-syd-v</module>
+    <module>elastichosts-mmi-a</module>
+    <module>elastichosts-dal-a</module>
     <module>openhosting-east1</module>
     <module>serverlove-z1-man</module>
     <module>skalicloud-sdg-my</module>
     <module>go2cloud-jhb1</module>
+    <module>google-compute-engine</module>
     <module>softlayer</module>
-    <module>hpcloud-compute</module>
-    <module>hpcloud-blockstorage</module>
-    <module>hpcloud-objectstorage</module>
-    <module>cloudfiles-us</module>
-    <module>cloudfiles-uk</module>
     <module>rackspace-cloudfiles-us</module>
     <module>rackspace-cloudfiles-uk</module>
     <module>rackspace-clouddns-us</module>
@@ -72,6 +71,6 @@
     <module>aws-route53</module>
     <module>ultradns-ws</module>
     <module>dynect</module>
-    <module>enterprisechef</module>
+    <module>profitbricks</module>
   </modules>
 </project>

@@ -17,6 +17,7 @@
 package org.jclouds.blobstore;
 
 import java.io.IOException;
+import java.util.Collection;
 
 import org.jclouds.blobstore.domain.Blob;
 import org.jclouds.blobstore.domain.BlobAccess;
@@ -42,7 +43,7 @@ public interface LocalStorageStrategy {
      * Return an iterator that reports all the containers under base path
      * @return
      */
-    Iterable<String> getAllContainerNames();
+    Collection<String> getAllContainerNames();
 
     /**
      * Creates a new container
@@ -80,7 +81,7 @@ public interface LocalStorageStrategy {
      */
     void clearContainer(String container, ListContainerOptions options);
 
-    /** @return StorageMetadata associated with a container name, e.g., creation date and location */
+    /** @return StorageMetadata associated with a container name, e.g., creation date and location, or null if container does not exist */
     StorageMetadata getContainerMetadata(String container);
 
     /**

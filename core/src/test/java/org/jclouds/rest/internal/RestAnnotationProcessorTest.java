@@ -24,6 +24,7 @@ import static org.jclouds.io.Payloads.newInputStreamPayload;
 import static org.jclouds.io.Payloads.newStringPayload;
 import static org.jclouds.providers.AnonymousProviderMetadata.forApiOnEndpoint;
 import static org.jclouds.reflect.Reflection2.method;
+import static org.jclouds.util.Strings2.urlEncode;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertNull;
 import static org.testng.Assert.assertTrue;
@@ -55,6 +56,7 @@ import javax.inject.Named;
 import javax.inject.Qualifier;
 import javax.inject.Singleton;
 import javax.ws.rs.Consumes;
+import javax.ws.rs.Encoded;
 import javax.ws.rs.FormParam;
 import javax.ws.rs.GET;
 import javax.ws.rs.HeaderParam;
@@ -78,6 +80,7 @@ import org.jclouds.http.HttpRequest;
 import org.jclouds.http.HttpRequestFilter;
 import org.jclouds.http.HttpResponse;
 import org.jclouds.http.IOExceptionRetryHandler;
+import org.jclouds.http.filters.ConnectionCloseHeader;
 import org.jclouds.http.filters.StripExpectHeader;
 import org.jclouds.http.functions.ParseFirstJsonValueNamed;
 import org.jclouds.http.functions.ParseJson;
@@ -481,6 +484,12 @@ public class RestAnnotationProcessorTest extends BaseRestApiTest {
       @Path("/")
       public void queryParamIterable(@Nullable @QueryParam("foo") Iterable<String> bars) {
       }
+
+      @FOO
+      @Path("/")
+      @QueryParams(keys = { "test param"}, values = { "foo bar" })
+      public void queryKeyEncoded() {
+      }
    }
 
    public void testQuery() throws SecurityException, NoSuchMethodException {
@@ -573,6 +582,30 @@ public class RestAnnotationProcessorTest extends BaseRestApiTest {
       assertEquals(request.getMethod(), "FOO");
    }
 
+   public void testQueryEncodedKey() throws SecurityException, NoSuchMethodException {
+      GeneratedHttpRequest request = processor.apply(Invocation.create(method(TestQuery.class, "queryKeyEncoded")));
+      assertEquals(request.getEndpoint().getHost(), "localhost");
+      assertEquals(request.getEndpoint().getPath(), "/");
+      assertEquals(request.getEndpoint().getRawQuery(), "x-ms-version=2009-07-17&test%20param=foo%20bar");
+      assertEquals(request.getMethod(), "FOO");
+   }
+
+   @QueryParams(keys = "test%param", values = "percent%")
+   public class TestInterfaceQueryParam {
+      @FOO
+      @Path("/")
+      public void query() {
+      }
+   }
+
+   public void testInterfaceEncodedKey() throws SecurityException, NoSuchMethodException {
+      GeneratedHttpRequest request = processor.apply(Invocation.create(method(TestInterfaceQueryParam.class, "query")));
+      assertEquals(request.getEndpoint().getHost(), "localhost");
+      assertEquals(request.getEndpoint().getPath(), "/");
+      assertEquals(request.getEndpoint().getRawQuery(), "test%25param=percent%25");
+      assertEquals(request.getMethod(), "FOO");
+   }
+
    interface TestPayloadParamVarargs {
       @POST
       void varargs(HttpRequestOptions... options);
@@ -600,7 +633,7 @@ public class RestAnnotationProcessorTest extends BaseRestApiTest {
       assertPayloadEquals(request, "", "application/octet-stream", false);
    }
 
-   private class TestHttpRequestOptions extends BaseHttpRequestOptions {
+   private static class TestHttpRequestOptions extends BaseHttpRequestOptions {
       TestHttpRequestOptions payload(String payload) {
          this.payload = payload;
          return this;
@@ -661,6 +694,16 @@ public class RestAnnotationProcessorTest extends BaseRestApiTest {
       assertPayloadEquals(request, "fooya", "application/unknown", false);
    }
 
+   public void testQueryVarargsEncoding() throws Exception {
+      Invokable<?, ?> method = method(TestPayloadParamVarargs.class, "varargsWithReq", String.class,
+            HttpRequestOptions[].class);
+      GeneratedHttpRequest request = processor.apply(
+            Invocation.create(method,
+                  ImmutableList.<Object> of("required param",
+                        new TestHttpRequestOptions().queryParams(ImmutableMultimap.of("key", "foo bar")))));
+      assertRequestLineEquals(request, "POST http://localhost:9999?key=foo%20bar HTTP/1.1");
+   }
+
    public void testDuplicateHeaderAndQueryVarargs() throws Exception {
       Invokable<?, ?> method = method(TestPayloadParamVarargs.class, "varargs",
             HttpRequestOptions[].class);
@@ -677,7 +720,7 @@ public class RestAnnotationProcessorTest extends BaseRestApiTest {
       assertPayloadEquals(request, "last_payload_wins!", "application/unknown", false);
    }
 
-   public class TestCustomMethod {
+   public static class TestCustomMethod {
       @FOO
       public void foo() {
       }
@@ -695,7 +738,7 @@ public class RestAnnotationProcessorTest extends BaseRestApiTest {
       void foo();
    }
 
-   public class TestOverridden implements Parent {
+   public static class TestOverridden implements Parent {
       @POST
       public void foo() {
       }
@@ -1440,6 +1483,34 @@ public class RestAnnotationProcessorTest extends BaseRestApiTest {
       assertEquals(request.getFilters().get(1).getClass(), StripExpectHeader.class);
    }
 
+   @Test
+   public void testRequestFilterAddConnection() {
+      // First, verify that by default, the StripExpectHeader filter is not applied
+      Invokable<?, ?> method = method(TestRequestFilter.class, "post");
+      Invocation invocation = Invocation.create(method,
+         ImmutableList.<Object>of(HttpRequest.builder().method("POST").endpoint("http://localhost").build()));
+      GeneratedHttpRequest request = processor.apply(invocation);
+      assertEquals(request.getFilters().size(), 1);
+      assertEquals(request.getFilters().get(0).getClass(), TestRequestFilter1.class);
+
+      // Now let's create a new injector with the property set. Use that to create the annotation processor.
+      Properties overrides = new Properties();
+      overrides.setProperty(Constants.PROPERTY_CONNECTION_CLOSE_HEADER, "true");
+      Injector injector = ContextBuilder.newBuilder(forApiOnEndpoint(Callee.class, "http://localhost:9999"))
+         .modules(ImmutableSet.<Module> of(new MockModule(), new NullLoggingModule(), new AbstractModule() {
+            protected void configure() {
+               bind(new TypeLiteral<Supplier<URI>>() {
+               }).annotatedWith(Localhost2.class).toInstance(
+                  Suppliers.ofInstance(URI.create("http://localhost:1111")));
+            }}))
+         .overrides(overrides).buildInjector();
+      RestAnnotationProcessor newProcessor = injector.getInstance(RestAnnotationProcessor.class);
+      // Verify that this time the filter is indeed applied as expected.
+      request = newProcessor.apply(invocation);
+      assertEquals(request.getFilters().size(), 2);
+      assertEquals(request.getFilters().get(1).getClass(), ConnectionCloseHeader.class);
+   }
+
    public class TestEncoding {
       @GET
       @Path("/{path1}/{path2}")
@@ -1496,6 +1567,12 @@ public class RestAnnotationProcessorTest extends BaseRestApiTest {
       }
 
       @GET
+      @Path("/{paramA}/{paramB}/{paramC}")
+      public void encodedParams(@PathParam("paramA") @Encoded String a, @PathParam("paramB") String b,
+                                        @PathParam("paramC") @Encoded String c) {
+      }
+
+      @GET
       @Path("/{path}")
       public void onePathNullable(@Nullable @PathParam("path") String path) {
       }
@@ -1518,6 +1595,21 @@ public class RestAnnotationProcessorTest extends BaseRestApiTest {
       @GET
       @Path("/")
       public void oneQueryParamExtractor(@QueryParam("one") @ParamParser(FirstCharacter.class) String one) {
+      }
+
+      @GET
+      @Path("/")
+      public void oneQueryParam(@QueryParam("one") String one) {
+      }
+
+      @GET
+      @Path("/")
+      public void encodedQueryParam(@QueryParam("encoded") @Encoded String encoded) {
+      }
+
+      @GET
+      @Path("/")
+      public void encodedQueryListParam(@QueryParam("encoded") @Encoded List<String> encodedStrings) {
       }
 
       @POST
@@ -1543,11 +1635,66 @@ public class RestAnnotationProcessorTest extends BaseRestApiTest {
    }
 
    @Test
+   public void testPathParamEncoding() throws Exception {
+      Invokable<?, ?> method = method(TestPath.class, "onePath", String.class);
+      // By default, "/" should not be encoded
+      GeneratedHttpRequest request = processor.apply(Invocation.create(method,
+            ImmutableList.<Object> of("foo/bar")));
+      assertRequestLineEquals(request, "GET http://localhost:9999/foo/bar HTTP/1.1");
+
+      // If we pass an encoded string, it should be encoded twice
+      request = processor.apply(Invocation.create(method, ImmutableList.<Object> of("foo%2Fbar")));
+      assertRequestLineEquals(request, "GET http://localhost:9999/foo%252Fbar HTTP/1.1");
+
+      // If we pass in a pre-encoded param, it should not be double encoded
+      method = method(TestPath.class, "encodedParams", String.class, String.class, String.class);
+      request = processor.apply(Invocation.create(method, ImmutableList.<Object>of("encoded%2Fparam", "encode%2Fdouble",
+            "foo%20bar")));
+      assertRequestLineEquals(request,
+            "GET http://localhost:9999/encoded%2Fparam/encode%252Fdouble/foo%20bar HTTP/1.1");
+   }
+
+   @Test
    public void testQueryParamExtractor() throws Exception {
       Invokable<?, ?> method = method(TestPath.class, "oneQueryParamExtractor", String.class);
       GeneratedHttpRequest request = processor.apply(Invocation.create(method,
             ImmutableList.<Object> of("localhost")));
       assertRequestLineEquals(request, "GET http://localhost:9999/?one=l HTTP/1.1");
+      assertNonPayloadHeadersEqual(request, "");
+      assertPayloadEquals(request, null, null, false);
+   }
+
+   @Test
+   public void testEncodedQueryParam() throws Exception {
+      Invokable<?, ?> method = method(TestPath.class, "encodedQueryParam", String.class);
+      GeneratedHttpRequest request = processor.apply(Invocation.create(method,
+            ImmutableList.<Object> of("foo%20bar")));
+      assertRequestLineEquals(request, "GET http://localhost:9999/?encoded=foo%20bar HTTP/1.1");
+      assertNonPayloadHeadersEqual(request, "");
+      assertPayloadEquals(request, null, null, false);
+
+      method = method(TestPath.class, "encodedQueryListParam", List.class);
+      String [] args = {"foo%20bar", "foo/bar"};
+      request = processor.apply(Invocation.create(method,
+            ImmutableList.<Object> of(ImmutableList.of("foo%20bar", "foo/bar"))));
+      assertRequestLineEquals(request, "GET http://localhost:9999/?encoded=foo%20bar&encoded=foo/bar HTTP/1.1");
+      assertNonPayloadHeadersEqual(request, "");
+      assertPayloadEquals(request, null, null, false);
+   }
+
+   @DataProvider(name = "queryStrings")
+   public Object[][] createQueryData() {
+      return new Object[][] { { "normal" }, { "sp ace" }, { "qu?stion" }, { "unic₪de" }, { "path/foo" }, { "colon:" },
+            { "asteri*k" }, { "quote\"" }, { "great<r" }, { "lesst>en" }, { "p|pe" } };
+   }
+
+   @Test(dataProvider = "queryStrings")
+   public void testQueryParam(String val) {
+      Invokable<?, ?> method = method(TestPath.class, "oneQueryParam", String.class);
+      GeneratedHttpRequest request = processor.apply(Invocation.create(method,
+            ImmutableList.<Object> of(val)));
+      assertRequestLineEquals(request, String.format("GET http://localhost:9999/?one=%s HTTP/1.1",
+            urlEncode(val, '/', ',')));
       assertNonPayloadHeadersEqual(request, "");
       assertPayloadEquals(request, null, null, false);
    }
@@ -1661,7 +1808,7 @@ public class RestAnnotationProcessorTest extends BaseRestApiTest {
       assertEquals(headers.get("x-amz-copy-source"), ImmutableList.of("/eggs/robot"));
    }
 
-   public class TestReplaceQueryOptions extends BaseHttpRequestOptions {
+   public static class TestReplaceQueryOptions extends BaseHttpRequestOptions {
       public TestReplaceQueryOptions() {
          this.queryParameters.put("x-amz-copy-source", "/{bucket}");
       }
@@ -2051,7 +2198,7 @@ public class RestAnnotationProcessorTest extends BaseRestApiTest {
             ImmutableList.of(dateService.rfc822DateFormat(date)));
    }
 
-   public class PrefixOptions extends BaseHttpRequestOptions {
+   public static class PrefixOptions extends BaseHttpRequestOptions {
       public PrefixOptions withPrefix(String prefix) {
          queryParameters.put("prefix", checkNotNull(prefix, "prefix"));
          return this;
@@ -2098,7 +2245,7 @@ public class RestAnnotationProcessorTest extends BaseRestApiTest {
       assertEquals(request.getHeaders().size(), 0);
    }
 
-   public class PayloadOptions extends BaseHttpRequestOptions {
+   public static class PayloadOptions extends BaseHttpRequestOptions {
       @Override
       public String buildStringPayload() {
          return "foo";
@@ -2357,7 +2504,7 @@ public class RestAnnotationProcessorTest extends BaseRestApiTest {
       assertPayloadEquals(request, "test", "application/unknown", false);
    }
 
-   public class TestReplaceFormOptions extends BaseHttpRequestOptions {
+   public static class TestReplaceFormOptions extends BaseHttpRequestOptions {
       public TestReplaceFormOptions() {
          this.formParameters.put("x-amz-copy-source", "/{bucket}");
       }

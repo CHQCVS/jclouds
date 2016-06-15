@@ -58,8 +58,10 @@ public final class ServiceType {
    public static final String DATABASE = "database";
 
    /**
+    * @deprecated use {@link #MESSAGING} instead.
     * Queues Service (Marconi)
     */
+   @Deprecated
    public static final String QUEUES = "queuing";
 
    /**
@@ -71,6 +73,16 @@ public final class ServiceType {
     * CDN Service (Poppy)
     */
    public static final String CDN = "cdn";
+
+   /**
+    * Shared Filsystem Service (Manila)
+    */
+   public static final String SHARED_FILESYSTEM = "share";
+
+   /**
+    * Messaging Service (Zaqar)
+    */
+   public static final String MESSAGING = "messaging";
 
    private ServiceType() {
       throw new AssertionError("intentionally unimplemented");

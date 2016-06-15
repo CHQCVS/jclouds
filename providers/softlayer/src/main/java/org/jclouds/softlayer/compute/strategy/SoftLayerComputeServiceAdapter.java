@@ -25,7 +25,6 @@ import static com.google.common.collect.Iterables.get;
 import static com.google.common.collect.Iterables.tryFind;
 import static java.lang.Math.round;
 import static java.lang.String.format;
-import static org.jclouds.compute.domain.Volume.Type;
 import static org.jclouds.compute.util.ComputeServiceUtils.getCores;
 import static org.jclouds.compute.util.ComputeServiceUtils.getSpace;
 import static org.jclouds.softlayer.reference.SoftLayerConstants.PROPERTY_SOFTLAYER_VIRTUALGUEST_ACTIVE_TRANSACTIONS_DELAY;
@@ -33,6 +32,7 @@ import static org.jclouds.softlayer.reference.SoftLayerConstants.PROPERTY_SOFTLA
 import static org.jclouds.util.Predicates2.retry;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
@@ -48,6 +48,7 @@ import org.jclouds.compute.domain.HardwareBuilder;
 import org.jclouds.compute.domain.Processor;
 import org.jclouds.compute.domain.Template;
 import org.jclouds.compute.domain.Volume;
+import org.jclouds.compute.domain.Volume.Type;
 import org.jclouds.compute.domain.internal.VolumeImpl;
 import org.jclouds.compute.reference.ComputeServiceConstants;
 import org.jclouds.domain.LoginCredentials;
@@ -75,10 +76,12 @@ import com.google.common.base.Function;
 import com.google.common.base.Optional;
 import com.google.common.base.Predicate;
 import com.google.common.base.Stopwatch;
+import com.google.common.base.Strings;
 import com.google.common.base.Supplier;
 import com.google.common.collect.ComparisonChain;
 import com.google.common.collect.FluentIterable;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.ImmutableSet.Builder;
 import com.google.common.collect.ImmutableSortedSet;
 import com.google.common.collect.Sets;
@@ -92,9 +95,10 @@ import com.google.common.collect.Sets;
 public class SoftLayerComputeServiceAdapter implements
       ComputeServiceAdapter<VirtualGuest, Hardware, OperatingSystem, Datacenter> {
 
+   private static final String USER_META_NOTES = "notes";
+   private static final int USER_META_NOTES_MAX_LENGTH = 1000;
    private static final String BOOTABLE_DEVICE = "0";
    public static final String DEFAULT_DISK_TYPE = "LOCAL";
-   public static final int DEFAULT_MAX_PORT_SPEED = 100;
 
    @Resource
    @Named(ComputeServiceConstants.COMPUTE_LOGGER)
@@ -131,24 +135,30 @@ public class SoftLayerComputeServiceAdapter implements
 
       SoftLayerTemplateOptions templateOptions = template.getOptions().as(SoftLayerTemplateOptions.class);
       String domainName = templateOptions.getDomainName();
-      String diskType = templateOptions.getDiskType().or(DEFAULT_DISK_TYPE);
-      boolean hourlyBillingFlag = templateOptions.isHourlyBillingFlag().or(true);
-      int maxPortSpeed = templateOptions.getPortSpeed().or(DEFAULT_MAX_PORT_SPEED);
+      String diskType = templateOptions.getDiskType() == null ? DEFAULT_DISK_TYPE : templateOptions.getDiskType();
+      boolean hourlyBillingFlag = templateOptions.isHourlyBillingFlag()  == null ? true : templateOptions.isHourlyBillingFlag();
+      Integer portSpeed = templateOptions.getPortSpeed();
+      Set<VirtualGuestNetworkComponent> networkComponents = portSpeed != null ?
+              ImmutableSet.of(VirtualGuestNetworkComponent.builder().speed(portSpeed).build()) :
+              ImmutableSet.<VirtualGuestNetworkComponent>of();
       final Datacenter datacenter = Datacenter.builder().name(template.getLocation().getId()).build();
       final String imageId = template.getImage().getId();
       int cores = (int) template.getHardware().getProcessors().get(0).getCores();
+      String notes = getNotes(templateOptions);
 
-      VirtualGuest.Builder virtualGuestBuilder = VirtualGuest.builder()
+      VirtualGuest.Builder<?> virtualGuestBuilder = VirtualGuest.builder()
               .domain(domainName)
               .hostname(name)
               .hourlyBillingFlag(hourlyBillingFlag)
               .startCpus(cores)
               .maxMemory(template.getHardware().getRam())
               .datacenter(datacenter)
-              .localDiskFlag(isLocalDisk(diskType));
+              .localDiskFlag(isLocalDisk(diskType))
+              .networkComponents(networkComponents);
+
       // set operating system or blockDeviceTemplateGroup
       Optional<OperatingSystem> optionalOperatingSystem = tryExtractOperatingSystemFrom(imageId);
-      if (optionalOperatingSystem.isPresent()) {
+      if (optionalOperatingSystem != null) {
          virtualGuestBuilder.operatingSystem(optionalOperatingSystem.get());
       // the imageId specified is an id of a public/private/flex image
       } else {
@@ -157,47 +167,47 @@ public class SoftLayerComputeServiceAdapter implements
          virtualGuestBuilder.blockDeviceTemplateGroup(blockDeviceTemplateGroup).build();
       }
       // set multi-disks
-      if (templateOptions.getBlockDevices().isPresent()) {
-         List<VirtualGuestBlockDevice> blockDevices = getBlockDevices(templateOptions.getBlockDevices().get(), diskType);
+      if (!templateOptions.getBlockDevices().isEmpty()) {
+         List<VirtualGuestBlockDevice> blockDevices = getBlockDevices(templateOptions.getBlockDevices(), diskType);
          virtualGuestBuilder.blockDevices(blockDevices);
       }
       // set dedicatedAccountHostOnlyFlag
-      if (templateOptions.isDedicatedAccountHostOnlyFlag().isPresent()) {
-         virtualGuestBuilder.dedicatedAccountHostOnly(templateOptions.isDedicatedAccountHostOnlyFlag().get());
+      if (templateOptions.isDedicatedAccountHostOnlyFlag() != null) {
+         virtualGuestBuilder.dedicatedAccountHostOnly(templateOptions.isDedicatedAccountHostOnlyFlag());
       }
       // set privateNetworkOnlyFlag
-      if (templateOptions.isPrivateNetworkOnlyFlag().isPresent()) {
-         virtualGuestBuilder.privateNetworkOnlyFlag(templateOptions.isPrivateNetworkOnlyFlag().get());
+      if (templateOptions.isPrivateNetworkOnlyFlag() != null) {
+         virtualGuestBuilder.privateNetworkOnlyFlag(templateOptions.isPrivateNetworkOnlyFlag());
       }
       // set primaryNetworkComponent.networkVlan.id
-      if (templateOptions.getPrimaryNetworkComponentNetworkVlanId().isPresent()) {
-         int primaryNetworkComponentNetworkVlanId = templateOptions.getPrimaryNetworkComponentNetworkVlanId().get();
+      if (templateOptions.getPrimaryNetworkComponentNetworkVlanId() != null) {
+         int primaryNetworkComponentNetworkVlanId = templateOptions.getPrimaryNetworkComponentNetworkVlanId();
          virtualGuestBuilder.primaryNetworkComponent(
                  VirtualGuestNetworkComponent.builder()
                          .networkVlan(NetworkVlan.builder().id(primaryNetworkComponentNetworkVlanId).build())
-                         .speed(maxPortSpeed).build());
+                         .build());
       }
       // set primaryBackendNetworkComponent.networkVlan.id
-      if (templateOptions.getPrimaryBackendNetworkComponentNetworkVlanId().isPresent()) {
-         int primaryBackendNetworkComponentNetworkVlanId = templateOptions.getPrimaryBackendNetworkComponentNetworkVlanId().get();
+      if (templateOptions.getPrimaryBackendNetworkComponentNetworkVlanId() != null) {
+         int primaryBackendNetworkComponentNetworkVlanId = templateOptions.getPrimaryBackendNetworkComponentNetworkVlanId();
          virtualGuestBuilder.primaryBackendNetworkComponent(
                  VirtualGuestNetworkComponent.builder()
                          .networkVlan(NetworkVlan.builder().id(primaryBackendNetworkComponentNetworkVlanId).build())
-                         .speed(maxPortSpeed).build());
+                         .build());
       }
       // set postInstallScriptUri
-      if (templateOptions.getPostInstallScriptUri().isPresent()) {
+      if (templateOptions.getPostInstallScriptUri() != null) {
          // Specifies the uri location of the script to be downloaded and run after installation is complete.
-         virtualGuestBuilder.postInstallScriptUri(templateOptions.getPostInstallScriptUri().get());
+         virtualGuestBuilder.postInstallScriptUri(templateOptions.getPostInstallScriptUri());
       }
       // set userData
-      if (templateOptions.getUserData().isPresent()) {
-         virtualGuestBuilder.virtualGuestAttribute(VirtualGuestAttribute.builder().value(templateOptions.getUserData().get()).build());
+      if (templateOptions.getUserData() != null) {
+         virtualGuestBuilder.virtualGuestAttribute(VirtualGuestAttribute.builder().value(templateOptions.getUserData()).build());
       }
       // set sshKeys
-      if (templateOptions.getSshKeys().isPresent()) {
+      if (!templateOptions.getSshKeys().isEmpty()) {
          Set<SecuritySshKey> sshKeys = Sets.newHashSet();
-         for (int sshKeyId : templateOptions.getSshKeys().get()) {
+         for (int sshKeyId : templateOptions.getSshKeys()) {
             sshKeys.add(SecuritySshKey.builder().id(sshKeyId).build());
          }
          virtualGuestBuilder.sshKeys(sshKeys);
@@ -209,8 +219,13 @@ public class SoftLayerComputeServiceAdapter implements
       logger.trace("<< VirtualGuest(%s)", result.getId());
 
       // tags
-      if (templateOptions.getTags() != null) {
+      if (!templateOptions.getTags().isEmpty()) {
          api.getVirtualGuestApi().setTags(result.getId(), templateOptions.getTags());
+      }
+
+      // notes
+      if (!Strings.isNullOrEmpty(notes)) {
+         api.getVirtualGuestApi().setNotes(result.getId(), notes);
       }
 
       logger.debug(">> awaiting login details for virtualGuest(%s)", result.getId());
@@ -227,8 +242,20 @@ public class SoftLayerComputeServiceAdapter implements
       }
       result = api.getVirtualGuestApi().getVirtualGuest(result.getId());
       Password pwd = get(result.getOperatingSystem().getPasswords(), 0);
-      return new NodeAndInitialCredentials(result, result.getId() + "",
+      return new NodeAndInitialCredentials<VirtualGuest>(result, result.getId() + "",
               LoginCredentials.builder().user(pwd.getUsername()).password(pwd.getPassword()).build());
+   }
+
+   private String getNotes(SoftLayerTemplateOptions templateOptions) {
+      String notes = null;
+      Map<String, String> meta = templateOptions.getUserMetadata();
+      if (meta != null) {
+         notes = meta.get(USER_META_NOTES);
+         if (!Strings.isNullOrEmpty(notes)) {
+            checkArgument(notes.length() <= USER_META_NOTES_MAX_LENGTH, "'notes' property in user metadata should be long at most " + USER_META_NOTES_MAX_LENGTH + " characters.");
+         }
+      }
+      return notes;
    }
 
    @Override
@@ -245,7 +272,7 @@ public class SoftLayerComputeServiceAdapter implements
                     .compare(getBootableDeviceType(h1), getBootableDeviceType(h2));
             if (!volumes1.isEmpty() && !volumes2.isEmpty() && volumes1.size() == volumes2.size()) {
                for (int i = 0; i < volumes1.size(); i++) {
-                  comparisonChain.compare(volumes1.get(i).getType(), volumes2.get(i).getType());
+                  comparisonChain = comparisonChain.compare(volumes1.get(i).getType(), volumes2.get(i).getType());
                }
             }
             return comparisonChain.result();
@@ -527,7 +554,7 @@ public class SoftLayerComputeServiceAdapter implements
       }
    }
 
-   private class IsOperatingSystem implements Predicate<SoftwareDescription> {
+   private static class IsOperatingSystem implements Predicate<SoftwareDescription> {
       @Override
       public boolean apply(SoftwareDescription softwareDescription) {
          // operatingSystem is set to '1' if this Software Description describes an Operating System.

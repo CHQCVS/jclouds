@@ -16,15 +16,11 @@
  */
 package org.jclouds.openstack.nova.v2_0.config;
 
-import static org.jclouds.openstack.keystone.v2_0.config.KeystoneHttpApiModule.aliasBinder;
-
-import java.net.URI;
-import java.util.Set;
-import java.util.concurrent.TimeUnit;
-
-import javax.inject.Provider;
-import javax.inject.Singleton;
-
+import com.google.common.cache.CacheBuilder;
+import com.google.common.cache.CacheLoader;
+import com.google.common.cache.LoadingCache;
+import com.google.inject.Provides;
+import com.google.inject.multibindings.MapBinder;
 import org.jclouds.http.HttpErrorHandler;
 import org.jclouds.http.annotation.ClientError;
 import org.jclouds.http.annotation.Redirection;
@@ -33,16 +29,18 @@ import org.jclouds.openstack.nova.v2_0.NovaApi;
 import org.jclouds.openstack.nova.v2_0.extensions.ExtensionNamespaces;
 import org.jclouds.openstack.nova.v2_0.handlers.NovaErrorHandler;
 import org.jclouds.openstack.v2_0.domain.Extension;
-import org.jclouds.openstack.v2_0.functions.PresentWhenExtensionAnnotationNamespaceEqualsAnyNamespaceInExtensionsSet;
+import org.jclouds.openstack.v2_0.functions.PresentWhenExtensionAnnotationMatchesExtensionSet;
 import org.jclouds.rest.ConfiguresHttpApi;
 import org.jclouds.rest.config.HttpApiModule;
 import org.jclouds.rest.functions.ImplicitOptionalConverter;
 
-import com.google.common.cache.CacheBuilder;
-import com.google.common.cache.CacheLoader;
-import com.google.common.cache.LoadingCache;
-import com.google.inject.Provides;
-import com.google.inject.multibindings.MapBinder;
+import javax.inject.Provider;
+import javax.inject.Singleton;
+import java.net.URI;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
+
+import static org.jclouds.openstack.keystone.v2_0.config.KeystoneHttpApiModule.namespaceAliasBinder;
 
 /**
  * Configures the Nova connection.
@@ -56,14 +54,14 @@ public class NovaHttpApiModule extends HttpApiModule<NovaApi> {
 
    @Override
    protected void configure() {
-      bind(ImplicitOptionalConverter.class).to(PresentWhenExtensionAnnotationNamespaceEqualsAnyNamespaceInExtensionsSet.class);
+      bind(ImplicitOptionalConverter.class).to(PresentWhenExtensionAnnotationMatchesExtensionSet.class);
       super.configure();
       bindDefaultAliases();
    }
 
    // Intentionally private so subclasses use the Guice multibindings to contribute their aliases
    private void bindDefaultAliases() {
-      MapBinder<URI, URI> aliases = aliasBinder(binder());
+      MapBinder<URI, URI> aliases = namespaceAliasBinder(binder());
       aliases.addBinding(URI.create(ExtensionNamespaces.SECURITY_GROUPS)).toInstance(
             URI.create("http://docs.openstack.org/compute/ext/securitygroups/api/v1.1"));
       aliases.addBinding(URI.create(ExtensionNamespaces.FLOATING_IPS)).toInstance(
@@ -96,11 +94,13 @@ public class NovaHttpApiModule extends HttpApiModule<NovaApi> {
             URI.create("http://docs.openstack.org/compute/ext/os-volume-attachment-update/api/v2"));
       aliases.addBinding(URI.create(ExtensionNamespaces.ATTACH_INTERFACES)).toInstance(
             URI.create("http://docs.openstack.org/compute/ext/interfaces/api/v1.1"));
+      aliases.addBinding(URI.create(ExtensionNamespaces.HYPERVISORS)).toInstance(
+            URI.create("http://docs.openstack.org/compute/ext/hypervisors/api/v1.1"));
    }
 
    @Provides
    @Singleton
-   public LoadingCache<String, Set<? extends Extension>> provideExtensionsByRegion(final Provider<NovaApi> novaApi) {
+   public final LoadingCache<String, Set<? extends Extension>> provideExtensionsByRegion(final Provider<NovaApi> novaApi) {
       return CacheBuilder.newBuilder().expireAfterWrite(23, TimeUnit.HOURS)
             .build(new CacheLoader<String, Set<? extends Extension>>() {
                @Override

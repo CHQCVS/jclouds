@@ -16,6 +16,7 @@
  */
 package org.jclouds.openstack.swift.v1.blobstore.integration;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.jclouds.openstack.keystone.v2_0.config.KeystoneProperties.CREDENTIAL_TYPE;
 
 import java.util.Properties;
@@ -28,7 +29,7 @@ import org.testng.annotations.Test;
 
 @Test(groups = "live", testName = "SwiftBlobIntegrationLiveTest")
 public class SwiftBlobIntegrationLiveTest extends BaseBlobIntegrationTest {
-   
+
    public SwiftBlobIntegrationLiveTest() {
       provider = "openstack-swift";
    }
@@ -68,6 +69,14 @@ public class SwiftBlobIntegrationLiveTest extends BaseBlobIntegrationTest {
       return 422;
    }
 
+   // not supported
+   @Override
+   protected void checkCacheControl(Blob blob, String cacheControl) {
+      assertThat(blob.getPayload().getContentMetadata().getCacheControl()).isNull();
+      assertThat(blob.getMetadata().getContentMetadata().getCacheControl()).isNull();
+   }
+
+   // not supported
    @Override
    protected void checkContentLanguage(Blob blob, String contentLanguage) {
       assert blob.getPayload().getContentMetadata().getContentLanguage() == null;
@@ -80,17 +89,42 @@ public class SwiftBlobIntegrationLiveTest extends BaseBlobIntegrationTest {
    }
 
    @Override
-   public void testCopyBlobReplaceMetadata() throws Exception {
-      throw new SkipException("Swift only supports appending to user metadata, not replacing it");
+   @Test(expectedExceptions = UnsupportedOperationException.class)
+   public void testPutBlobAccess() throws Exception {
+      super.testPutBlobAccess();
    }
 
    @Override
-   public void testMultipartUploadSinglePart() throws Exception {
-      throw new SkipException("openstack-swift does not support setting blob metadata during multipart upload");
+   @Test(expectedExceptions = UnsupportedOperationException.class)
+   public void testPutBlobAccessMultipart() throws Exception {
+      super.testPutBlobAccessMultipart();
    }
 
    @Override
-   public void testMultipartUploadMultipleParts() throws Exception {
-      throw new SkipException("openstack-swift does not support setting blob metadata during multipart upload");
+   @Test(expectedExceptions = UnsupportedOperationException.class)
+   public void testCopyIfNoneMatch() throws Exception {
+      super.testCopyIfNoneMatch();
+   }
+
+   @Override
+   @Test(expectedExceptions = UnsupportedOperationException.class)
+   public void testCopyIfNoneMatchNegative() throws Exception {
+      super.testCopyIfNoneMatchNegative();
+   }
+
+   @Override
+   public void testListMultipartUploads() throws Exception {
+      try {
+         super.testListMultipartUploads();
+      } catch (UnsupportedOperationException uoe) {
+         throw new SkipException("Swift does not support listing multipart uploads", uoe);
+      }
+   }
+
+   // TODO: testCopyIfModifiedSinceNegative throws HTTP 304 not 412 error
+
+   @Override
+   protected long getMinimumMultipartBlobSize() {
+      return 1;
    }
 }

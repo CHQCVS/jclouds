@@ -27,12 +27,12 @@ import static org.jclouds.openstack.swift.v1.options.PutOptions.Builder.metadata
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.UUID;
 
 import javax.inject.Inject;
 
 import org.jclouds.blobstore.BlobStore;
 import org.jclouds.blobstore.BlobStoreContext;
+import org.jclouds.blobstore.KeyNotFoundException;
 import org.jclouds.blobstore.domain.Blob;
 import org.jclouds.blobstore.domain.BlobAccess;
 import org.jclouds.blobstore.domain.BlobBuilder;
@@ -54,16 +54,19 @@ import org.jclouds.blobstore.options.GetOptions;
 import org.jclouds.blobstore.options.ListContainerOptions;
 import org.jclouds.blobstore.options.PutOptions;
 import org.jclouds.blobstore.strategy.ClearListStrategy;
+import org.jclouds.blobstore.strategy.internal.MultipartUploadSlicingAlgorithm;
 import org.jclouds.collect.Memoized;
 import org.jclouds.domain.Location;
 import org.jclouds.io.ContentMetadata;
 import org.jclouds.io.Payload;
+import org.jclouds.io.PayloadSlicer;
 import org.jclouds.io.payloads.ByteSourcePayload;
 import org.jclouds.openstack.swift.v1.SwiftApi;
 import org.jclouds.openstack.swift.v1.blobstore.functions.ToBlobMetadata;
 import org.jclouds.openstack.swift.v1.blobstore.functions.ToListContainerOptions;
 import org.jclouds.openstack.swift.v1.blobstore.functions.ToResourceMetadata;
 import org.jclouds.openstack.swift.v1.domain.Container;
+import org.jclouds.openstack.swift.v1.domain.DeleteStaticLargeObjectResponse;
 import org.jclouds.openstack.swift.v1.domain.ObjectList;
 import org.jclouds.openstack.swift.v1.domain.Segment;
 import org.jclouds.openstack.swift.v1.domain.SwiftObject;
@@ -72,6 +75,7 @@ import org.jclouds.openstack.swift.v1.features.ObjectApi;
 import org.jclouds.openstack.swift.v1.options.UpdateContainerOptions;
 import org.jclouds.openstack.swift.v1.reference.SwiftHeaders;
 
+import com.google.common.annotations.Beta;
 import com.google.common.base.Function;
 import com.google.common.base.Optional;
 import com.google.common.base.Supplier;
@@ -81,9 +85,11 @@ import com.google.common.cache.LoadingCache;
 import com.google.common.collect.FluentIterable;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableMap.Builder;
 import com.google.common.collect.ImmutableMultimap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
+import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.io.ByteSource;
 import com.google.common.net.HttpHeaders;
@@ -95,12 +101,14 @@ public class RegionScopedSwiftBlobStore implements BlobStore {
 
    @Inject
    protected RegionScopedSwiftBlobStore(Injector baseGraph, BlobStoreContext context, SwiftApi api,
-         @Memoized Supplier<Set<? extends Location>> locations, @Assisted String regionId) {
+         @Memoized Supplier<Set<? extends Location>> locations, @Assisted String regionId,
+         PayloadSlicer slicer) {
       checkNotNull(regionId, "regionId");
       Optional<? extends Location> found = tryFind(locations.get(), idEquals(regionId));
       checkArgument(found.isPresent(), "region %s not in %s", regionId, locations.get());
       this.region = found.get();
       this.regionId = regionId;
+      this.slicer = slicer;
       this.toResourceMetadata = new ToResourceMetadata(found.get());
       this.context = context;
       this.api = api;
@@ -121,6 +129,7 @@ public class RegionScopedSwiftBlobStore implements BlobStore {
    private final BlobToHttpGetOptions toGetOptions = new BlobToHttpGetOptions();
    private final ToListContainerOptions toListContainerOptions = new ToListContainerOptions();
    private final ToResourceMetadata toResourceMetadata;
+   protected final PayloadSlicer slicer;
 
    @Override
    public Set<? extends Location> listAssignableLocations() {
@@ -198,9 +207,7 @@ public class RegionScopedSwiftBlobStore implements BlobStore {
          List<? extends StorageMetadata> list = transform(objects, toBlobMetadata(container));
          int limit = Optional.fromNullable(options.getMaxResults()).or(10000);
          String marker = null;
-         if (list.isEmpty()) {
-            marker = options.getMarker();
-         } else if (list.size() == limit) {
+         if (!list.isEmpty() && list.size() == limit) {
             marker = list.get(limit - 1).getName();
          }
          // TODO: we should probably deprecate this option
@@ -231,8 +238,11 @@ public class RegionScopedSwiftBlobStore implements BlobStore {
 
    @Override
    public String putBlob(String container, Blob blob, PutOptions options) {
+      if (options.getBlobAccess() != BlobAccess.PRIVATE) {
+         throw new UnsupportedOperationException("blob access not supported by swift");
+      }
       if (options.isMultipart()) {
-         throw new UnsupportedOperationException();
+         return putMultipartBlob(container, blob, options);
       }
       ObjectApi objectApi = api.getObjectApi(regionId, container);
       return objectApi.put(blob.getMetadata().getName(), blob.getPayload(), metadata(blob.getMetadata().getUserMetadata()));
@@ -243,12 +253,26 @@ public class RegionScopedSwiftBlobStore implements BlobStore {
          CopyOptions options) {
       ObjectApi objectApi = api.getObjectApi(regionId, toContainer);
 
-      Map<String, String> userMetadata;
-      Map<String, String> systemMetadata = Maps.newHashMap();
-      ContentMetadata contentMetadata = options.getContentMetadata().orNull();
+      org.jclouds.openstack.swift.v1.options.CopyOptions swiftOptions = new org.jclouds.openstack.swift.v1.options.CopyOptions();
 
-      if (contentMetadata != null ||
-            options.getUserMetadata().isPresent()) {
+      if (options.ifMatch() != null) {
+         swiftOptions.ifMatch(options.ifMatch());
+      }
+      if (options.ifNoneMatch() != null) {
+         throw new UnsupportedOperationException("Swift does not support ifNoneMatch");
+      }
+      if (options.ifModifiedSince() != null) {
+         swiftOptions.ifModifiedSince(options.ifModifiedSince());
+      }
+      if (options.ifUnmodifiedSince() != null) {
+         swiftOptions.ifUnmodifiedSince(options.ifUnmodifiedSince());
+      }
+
+      Map<String, String> systemMetadata = Maps.newHashMap();
+      ContentMetadata contentMetadata = options.contentMetadata();
+      Map<String, String> userMetadata = options.userMetadata();
+
+      if (contentMetadata != null || userMetadata != null) {
          if (contentMetadata != null) {
             String contentDisposition = contentMetadata.getContentDisposition();
             if (contentDisposition != null) {
@@ -270,13 +294,14 @@ public class RegionScopedSwiftBlobStore implements BlobStore {
                systemMetadata.put(HttpHeaders.CONTENT_TYPE, contentType);
             }
          }
-         if (options.getUserMetadata().isPresent()) {
-            userMetadata = options.getUserMetadata().get();
-         } else {
+         if (userMetadata == null) {
             userMetadata = Maps.newHashMap();
          }
       } else {
          SwiftObject metadata = api.getObjectApi(regionId, fromContainer).getWithoutBody(fromName);
+         if (metadata == null) {
+            throw new KeyNotFoundException(fromContainer, fromName, "Swift could not find the specified source key");
+         }
          contentMetadata = metadata.getPayload().getContentMetadata();
          String contentDisposition = contentMetadata.getContentDisposition();
          if (contentDisposition != null) {
@@ -297,10 +322,7 @@ public class RegionScopedSwiftBlobStore implements BlobStore {
          userMetadata = metadata.getMetadata();
       }
 
-      boolean copied = objectApi.copy(toName, fromContainer, fromName, userMetadata, systemMetadata);
-      if (!copied) {
-         throw new RuntimeException("could not copy blob");
-      }
+      objectApi.copy(toName, fromContainer, fromName, userMetadata, systemMetadata, swiftOptions);
 
       // TODO: Swift copy object *appends* user metadata, does not overwrite
       return objectApi.getWithoutBody(toName).getETag();
@@ -308,7 +330,7 @@ public class RegionScopedSwiftBlobStore implements BlobStore {
 
    @Override
    public BlobMetadata blobMetadata(String container, String name) {
-      SwiftObject object = api.getObjectApi(regionId, container).get(name);
+      SwiftObject object = api.getObjectApi(regionId, container).getWithoutBody(name);
       if (object == null) {
          return null;
       }
@@ -335,9 +357,20 @@ public class RegionScopedSwiftBlobStore implements BlobStore {
 
    @Override
    public void removeBlob(String container, String name) {
-      api.getObjectApi(regionId, container).delete(name);
+      // Multipart objects have a manifest which points to subobjects.  Normally
+      // deleting a object only deletes the manifest, leaving the subobjects.
+      // We first try a multipart delete and if that fails since the object is
+      // not an MPU we fall back to single-part delete.
+      DeleteStaticLargeObjectResponse response = api.getStaticLargeObjectApi(regionId, container).delete(name);
+      if (!response.status().equals("200 OK")) {
+         api.getObjectApi(regionId, container).delete(name);
+      }
    }
 
+   /**
+    * Delete multiple single-part objects.  Note that this does not remove the
+    * subobjects of a multi-part upload.
+    */
    @Override
    public void removeBlobs(String container, Iterable<String> names) {
       BulkApi bulkApi = api.getBulkApi(regionId);
@@ -352,7 +385,7 @@ public class RegionScopedSwiftBlobStore implements BlobStore {
 
    @Override
    public BlobAccess getBlobAccess(String container, String name) {
-      throw new UnsupportedOperationException("unsupported in swift");
+      return BlobAccess.PRIVATE;
    }
 
    @Override
@@ -397,39 +430,73 @@ public class RegionScopedSwiftBlobStore implements BlobStore {
    public long countBlobs(String containerName) {
       Container container = api.getContainerApi(regionId).get(containerName);
       // undefined if container doesn't exist, so default to zero
-      return container != null ? container.getObjectCount() : 0;
+      return container != null && container.getObjectCount() != null ? container.getObjectCount() : 0;
    }
 
    @Override
-   public MultipartUpload initiateMultipartUpload(String container, BlobMetadata blobMetadata) {
-      String uploadId = UUID.randomUUID().toString();
-      return MultipartUpload.create(container, blobMetadata.getName(), uploadId, blobMetadata);
+   public MultipartUpload initiateMultipartUpload(String container, BlobMetadata blobMetadata, PutOptions options) {
+      if (options.getBlobAccess() != BlobAccess.PRIVATE) {
+         throw new UnsupportedOperationException("blob ACLs not supported in swift");
+      }
+      return initiateMultipartUpload(container, blobMetadata, 0, options);
+   }
+
+   private MultipartUpload initiateMultipartUpload(String container, BlobMetadata blobMetadata, long partSize, PutOptions options) {
+      Long contentLength = blobMetadata.getContentMetadata().getContentLength();
+      String uploadId = String.format("%s/slo/%.6f/%s/%s", blobMetadata.getName(),
+              System.currentTimeMillis() / 1000.0, contentLength == null ? Long.valueOf(0) : contentLength,
+              partSize);
+      return MultipartUpload.create(container, blobMetadata.getName(), uploadId, blobMetadata, options);
    }
 
    @Override
    public void abortMultipartUpload(MultipartUpload mpu) {
       ImmutableList.Builder<String> names = ImmutableList.builder();
       for (MultipartPart part : listMultipartUpload(mpu)) {
-         names.add(mpu.blobName() + "-" + part.partNumber());
+         names.add(getMPUPartName(mpu, part.partNumber()));
       }
       removeBlobs(mpu.containerName(), names.build());
+   }
+
+   private ImmutableMap<String, String> getContentMetadataForManifest(ContentMetadata contentMetadata) {
+      Builder<String, String> mapBuilder = ImmutableMap.builder();
+      if (contentMetadata.getContentType() != null) {
+         mapBuilder.put("content-type", contentMetadata.getContentType());
+      }
+      /**
+       * Do not set content-length. Set automatically to manifest json string length by BindManifestToJsonPayload
+       */
+      if (contentMetadata.getContentDisposition() != null) {
+         mapBuilder.put("content-disposition", contentMetadata.getContentDisposition());
+      }
+      if (contentMetadata.getContentEncoding() != null) {
+         mapBuilder.put("content-encoding", contentMetadata.getContentEncoding());
+      }
+      if (contentMetadata.getContentLanguage() != null) {
+         mapBuilder.put("content-language", contentMetadata.getContentLanguage());
+      }
+      return mapBuilder.build();
+   }
+
+   private String getMPUPartName(MultipartUpload mpu, int partNumber) {
+      return String.format("%s/%08d", mpu.id(), partNumber);
    }
 
    @Override
    public String completeMultipartUpload(MultipartUpload mpu, List<MultipartPart> parts) {
       ImmutableList.Builder<Segment> builder = ImmutableList.builder();
       for (MultipartPart part : parts) {
-         String path = mpu.containerName() + "/" + mpu.blobName() + "-" + part.partNumber();
+         String path = mpu.containerName() + "/" + getMPUPartName(mpu, part.partNumber());
          builder.add(Segment.builder().path(path).etag(part.partETag()).sizeBytes(part.partSize()).build());
       }
-      Map<String, String> metadata = ImmutableMap.of();  // TODO: how to populate this from mpu.blobMetadata()?
+
       return api.getStaticLargeObjectApi(regionId, mpu.containerName()).replaceManifest(mpu.blobName(),
-            builder.build(), metadata);
+            builder.build(), mpu.blobMetadata().getUserMetadata(), getContentMetadataForManifest(mpu.blobMetadata().getContentMetadata()));
    }
 
    @Override
    public MultipartPart uploadMultipartPart(MultipartUpload mpu, int partNumber, Payload payload) {
-      String partName = mpu.blobName() + "-" + partNumber;
+      String partName = getMPUPartName(mpu, partNumber);
       String eTag = api.getObjectApi(regionId, mpu.containerName()).put(partName, payload);
       long partSize = payload.getContentMetadata().getContentLength();
       return MultipartPart.create(partNumber, partSize, eTag);
@@ -439,21 +506,24 @@ public class RegionScopedSwiftBlobStore implements BlobStore {
    public List<MultipartPart> listMultipartUpload(MultipartUpload mpu) {
       ImmutableList.Builder<MultipartPart> parts = ImmutableList.builder();
       PageSet<? extends StorageMetadata> pageSet = list(mpu.containerName(),
-            new ListContainerOptions().afterMarker(mpu.blobName()));
+            new ListContainerOptions().prefix(mpu.id() + "/"));
       // TODO: pagination
       for (StorageMetadata sm : pageSet) {
-         if (!sm.getName().startsWith(mpu.blobName() + "-")) {
-            break;
-         }
-         int partNumber = Integer.parseInt(sm.getName().substring((mpu.blobName() + "-").length()));
+         int lastSlash = sm.getName().lastIndexOf('/');
+         int partNumber = Integer.parseInt(sm.getName().substring(lastSlash + 1));
          parts.add(MultipartPart.create(partNumber, sm.getSize(), sm.getETag()));
       }
       return parts.build();
    }
 
    @Override
+   public List<MultipartUpload> listMultipartUploads(String container) {
+      throw new UnsupportedOperationException();
+   }
+
+   @Override
    public long getMinimumMultipartPartSize() {
-      return 1024 * 1024;
+      return 1024 * 1024 + 1;
    }
 
    @Override
@@ -507,5 +577,24 @@ public class RegionScopedSwiftBlobStore implements BlobStore {
    @Override
    public long countBlobs(String containerName, ListContainerOptions options) {
       throw new UnsupportedOperationException();
+   }
+
+   // copied from BaseBlobStore
+   @Beta
+   protected String putMultipartBlob(String container, Blob blob, PutOptions overrides) {
+      List<MultipartPart> parts = Lists.newArrayList();
+      long contentLength = checkNotNull(blob.getMetadata().getContentMetadata().getContentLength(),
+            "must provide content-length to use multi-part upload");
+      MultipartUploadSlicingAlgorithm algorithm = new MultipartUploadSlicingAlgorithm(
+            getMinimumMultipartPartSize(), getMaximumMultipartPartSize(), getMaximumNumberOfParts());
+      long partSize = algorithm.calculateChunkSize(contentLength);
+      MultipartUpload mpu = initiateMultipartUpload(container, blob.getMetadata(), partSize, overrides);
+      int partNumber = 1;
+      for (Payload payload : slicer.slice(blob.getPayload(), partSize)) {
+         MultipartPart part = uploadMultipartPart(mpu, partNumber, payload);
+         parts.add(part);
+         ++partNumber;
+      }
+      return completeMultipartUpload(mpu, parts);
    }
 }

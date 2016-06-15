@@ -32,6 +32,9 @@ import com.google.common.io.Files;
 
 public class OAuthTestUtils {
 
+   public static final Object[][] NO_INVOCATIONS = new Object[0][0];
+   public static final Object[][] SINGLE_NO_ARG_INVOCATION = { new Object[0] };
+
    public static Properties defaultProperties(Properties properties) {
       try {
          properties = properties == null ? new Properties() : properties;
@@ -64,7 +67,7 @@ public class OAuthTestUtils {
       if (System.getProperties().containsKey(testKey)) {
          val = System.getProperty(testKey);
       }
-      checkNotNull(val, String.format("the property %s must be set (pem private key file path or private key as a string)", testKey));
+      checkNotNull(val, "the property %s must be set (pem private key file path or private key as a string)", testKey);
 
       if (val.startsWith("-----BEGIN")) {
          return val;
@@ -83,7 +86,7 @@ public class OAuthTestUtils {
       checkNotNull(properties);
       checkNotNull(key);
       String value = properties.getProperty(key);
-      return checkNotNull(value, String.format("mandatory property %s or test.%s was not present", key, key));
+      return checkNotNull(value, "mandatory property %s or test.%s was not present", key, key);
    }
 
 }
